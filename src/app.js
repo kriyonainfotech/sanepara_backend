@@ -25,9 +25,18 @@ import sopRoutes from './routes/sops.js';
 import reportRoutes from './routes/reports.js';
 import complianceRoutes from './routes/compliance.js';
 
+// CLIENT_URL can list several origins separated by commas; "*" matches one subdomain part,
+// e.g. Vercel preview URLs: https://sanepara-frontend-*-kriyona-infotechs-projects.vercel.app
+// Browsers send the origin without a trailing slash, so one in CLIENT_URL is ignored.
+function allowedOrigins(value) {
+  if (!value) return true;
+  return value.split(',').map((o) => o.trim().replace(/\/+$/, '')).filter(Boolean).map((o) =>
+    o.includes('*') ? new RegExp(`^${o.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[a-z0-9-]+')}$`) : o);
+}
+
 export function createApp() {
   const app = express();
-  app.use(cors({ origin: process.env.CLIENT_URL || true }));
+  app.use(cors({ origin: allowedOrigins(process.env.CLIENT_URL) }));
   app.use(express.json({ limit: '5mb' })); // customer imports send up to 2000 rows
   // Express 5 leaves req.body undefined when a request has no JSON body.
   app.use((req, _res, next) => {
