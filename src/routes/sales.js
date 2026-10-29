@@ -3,12 +3,9 @@ import mongoose from 'mongoose';
 import { Sale } from '../models/Sale.js';
 import { SalePayment } from '../models/SalePayment.js';
 import { Customer } from '../models/Customer.js';
-import { CustomerService } from '../models/CustomerService.js';
-import { B2BPartner } from '../models/B2BPartner.js';
-import { User } from '../models/User.js';
 import { nextNumber } from '../models/Counter.js';
 import { protect, can, hasPermission } from '../middleware/auth.js';
-import { computeFees, recalcSale } from '../services/sales.js';
+import { buildSale, recalcSale } from '../services/sales.js';
 import { monthBounds } from '../services/payroll.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
 import { isDayKey, todayKey } from '../utils/dates.js';
@@ -31,64 +28,6 @@ const populate = (q) =>
 function range(q) {
   if (isDayKey(q.from) && isDayKey(q.to)) return [q.from, q.to];
   return monthBounds(isMonth(q.month) ? q.month : todayKey().slice(0, 7));
-}
-
-async function buildSale(body, existing) {
-  const data = {};
-  const customerId = body.customer ?? existing?.customer;
-  if (!mongoose.isValidObjectId(customerId) || !(await Customer.exists({ _id: customerId }))) throw new HttpError(400, 'Select a customer');
-  data.customer = customerId;
-
-  if (body.customerService !== undefined) {
-    if (body.customerService) {
-      const cs = await CustomerService.findById(body.customerService);
-      if (!cs || String(cs.customer) !== String(customerId)) throw new HttpError(400, 'That service is not assigned to this customer');
-      data.customerService = cs._id;
-      data.service = cs.service;
-    } else {
-      data.customerService = undefined;
-      data.service = mongoose.isValidObjectId(body.service) ? body.service : undefined;
-    }
-  } else if (body.service !== undefined) {
-    data.service = mongoose.isValidObjectId(body.service) ? body.service : undefined;
-  }
-
-  const title = (body.title ?? existing?.title)?.trim();
-  if (!title) throw new HttpError(400, 'Add what the sale is for');
-  data.title = title;
-
-  const fees = computeFees(body.professionalFee ?? existing?.professionalFee, body.govtFee ?? existing?.govtFee);
-  if (fees.totalAmount <= 0) throw new HttpError(400, 'Enter the professional fee and/or government fee');
-  if (existing && fees.totalAmount < existing.receivedAmount + existing.discountAmount)
-    throw new HttpError(400, `Total cannot be less than what is already received (₹${existing.receivedAmount + existing.discountAmount})`);
-  Object.assign(data, fees);
-
-  const saleDate = body.saleDate ?? existing?.saleDate ?? todayKey();
-  if (!isDayKey(saleDate)) throw new HttpError(400, 'Pick the sale date');
-  data.saleDate = saleDate;
-
-  if (body.soldBy !== undefined) {
-    if (body.soldBy && !(mongoose.isValidObjectId(body.soldBy) && (await User.exists({ _id: body.soldBy })))) throw new HttpError(400, 'Select a valid member');
-    data.soldBy = body.soldBy || undefined;
-  }
-
-  if (body.b2bPartner !== undefined) {
-    if (body.b2bPartner) {
-      const partner = await B2BPartner.findById(body.b2bPartner);
-      if (!partner) throw new HttpError(400, 'Select a valid B2B partner');
-      data.b2bPartner = partner._id;
-      const pct = body.b2bPercent === undefined || body.b2bPercent === '' ? partner.percentage : Number(body.b2bPercent);
-      if (!(pct >= 0 && pct <= 100)) throw new HttpError(400, 'Partner % must be between 0 and 100');
-      data.b2bPercent = pct;
-    } else {
-      data.b2bPartner = undefined;
-      data.b2bPercent = 0;
-    }
-  } else if (body.b2bPercent !== undefined && existing?.b2bPartner) {
-    data.b2bPercent = Number(body.b2bPercent) || 0;
-  }
-  if (body.notes !== undefined) data.notes = body.notes;
-  return data;
 }
 
 // ---------- list & stats ----------

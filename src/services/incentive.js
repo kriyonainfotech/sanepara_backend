@@ -24,3 +24,12 @@ export async function incentivesByMember(month) {
   ]);
   return Object.fromEntries(rows.map((r) => [String(r._id), r2(r.incentive)]));
 }
+
+// Credit a member's incentive for a sale: converts their pending referral of this
+// customer + service if there is one, else records a converted one.
+export async function creditIncentive({ customer, service, member, sale, amount, by }) {
+  const done = { status: 'Converted', sale: sale._id, convertedOn: sale.saleDate, incentive: r2(amount), rejectReason: undefined, reviewedBy: by };
+  const pending = await Referral.findOne({ customer, service, referredBy: member, status: 'Pending' }).sort({ referredOn: 1 });
+  if (pending) return Object.assign(pending, done).save();
+  return Referral.create({ customer, service, referredBy: member, referredOn: sale.saleDate, note: `Sale ${sale.saleNo}`, ...done });
+}

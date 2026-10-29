@@ -8,6 +8,8 @@ const customerSchema = new mongoose.Schema(
     email: { type: String, trim: true, lowercase: true },
     gstNumber: { type: String, trim: true, uppercase: true },
     address: { type: String, trim: true },
+    referredBy: { type: String, trim: true },
+    referredByPartner: { type: mongoose.Schema.Types.ObjectId, ref: 'B2BPartner', default: null },
     notes: { type: String, trim: true },
     addedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   },

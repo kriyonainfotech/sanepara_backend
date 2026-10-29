@@ -6,8 +6,14 @@ import { Service } from '../models/Service.js';
 import { Task } from '../models/Task.js';
 import { ScheduleItem } from '../models/ScheduleItem.js';
 import { createItemsForAssignment } from '../services/scheduleSync.js';
+import mongoose from 'mongoose';
 import { Sale } from '../models/Sale.js';
 import { SalePayment } from '../models/SalePayment.js';
+import { User } from '../models/User.js';
+import { Referral } from '../models/Referral.js';
+import { nextNumber } from '../models/Counter.js';
+import { buildSale, recalcSale } from '../services/sales.js';
+import { creditIncentive } from '../services/incentive.js';
 import { hasPermission } from '../middleware/auth.js';
 import { protect, can } from '../middleware/auth.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
@@ -16,8 +22,12 @@ import { todayKey } from '../utils/dates.js';
 const router = Router();
 router.use(protect);
 
-const EDITABLE = ['businessName', 'contactPerson', 'phone', 'email', 'gstNumber', 'address', 'notes'];
-const pick = (body) => Object.fromEntries(EDITABLE.filter((k) => k in body).map((k) => [k, body[k]]));
+const EDITABLE = ['businessName', 'contactPerson', 'phone', 'email', 'gstNumber', 'address', 'referredBy', 'referredByPartner', 'notes'];
+const pick = (body) => {
+  const out = Object.fromEntries(EDITABLE.filter((k) => k in body).map((k) => [k, body[k]]));
+  if ('referredByPartner' in out) out.referredByPartner = out.referredByPartner || null;
+  return out;
+};
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 router.get(
@@ -50,6 +60,7 @@ router.get(
     const [customers, total] = await Promise.all([
       Customer.find(filter)
         .populate('addedBy', 'name')
+        .populate('referredByPartner', 'name firmName')
         .sort({ createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(limit),
@@ -72,7 +83,7 @@ router.get(
   '/:id',
   can('customers', 'view'),
   asyncHandler(async (req, res) => {
-    const customer = await Customer.findById(req.params.id).populate('addedBy', 'name');
+    const customer = await Customer.findById(req.params.id).populate('addedBy', 'name').populate('referredByPartner', 'name firmName');
     if (!customer) throw new HttpError(404, 'Customer not found');
     const services = await CustomerService.find({ customer: customer._id })
       .populate('service', 'name tasks price')
@@ -142,7 +153,7 @@ router.post(
   can('customers', 'create'),
   asyncHandler(async (req, res) => {
     const customer = await Customer.create({ ...pick(req.body), addedBy: req.user._id });
-    await customer.populate('addedBy', 'name');
+    await customer.populate([{ path: 'addedBy', select: 'name' }, { path: 'referredByPartner', select: 'name firmName' }]);
     res.status(201).json({ customer });
   })
 );
@@ -234,7 +245,7 @@ router.put(
     const customer = await Customer.findByIdAndUpdate(req.params.id, pick(req.body), {
       new: true,
       runValidators: true,
-    }).populate('addedBy', 'name');
+    }).populate('addedBy', 'name').populate('referredByPartner', 'name firmName');
     if (!customer) throw new HttpError(404, 'Customer not found');
     res.json({ customer });
   })
@@ -269,6 +280,35 @@ router.post(
     if (!customer) throw new HttpError(404, 'Customer not found');
     if (!service || !service.isActive) throw new HttpError(400, 'Select a valid service');
 
+    // Optional sale created with the assignment: fees, sold by, B2B partner, referral person, incentive.
+    const s = req.body.sale;
+    let saleData = null;
+    let incentive = null;
+    if (s) {
+      if (!hasPermission(req, 'sales', 'create')) throw new HttpError(403, 'You do not have access to create sales');
+      saleData = await buildSale({
+        customer: customer._id,
+        service: service._id,
+        title: s.title || service.name,
+        professionalFee: s.professionalFee,
+        govtFee: s.govtFee,
+        saleDate: s.saleDate,
+        soldBy: s.soldBy ?? String(req.user._id),
+        b2bPartner: s.b2bPartner || '',
+        b2bPercent: s.b2bPercent,
+        referredBy: s.referredBy,
+        referralAmount: s.referralAmount,
+        notes: s.notes,
+      });
+      if (s.incentiveMember) {
+        if (!hasPermission(req, 'incentives', 'manage')) throw new HttpError(403, 'You do not have access to give incentives');
+        if (!(mongoose.isValidObjectId(s.incentiveMember) && (await User.exists({ _id: s.incentiveMember })))) throw new HttpError(400, 'Select a valid member for the incentive');
+        const amount = Math.round((Number(s.incentive) || 0) * 100) / 100;
+        if (amount < 0) throw new HttpError(400, 'Incentive cannot be negative');
+        incentive = { member: s.incentiveMember, amount };
+      }
+    }
+
     const assignment = await CustomerService.create({
       customer: customer._id,
       service: service._id,
@@ -276,7 +316,14 @@ router.post(
     });
     await createItemsForAssignment(assignment, service, req.user._id);
     await assignment.populate('service', 'name tasks');
-    res.status(201).json({ assignment });
+
+    let sale = null;
+    if (saleData) {
+      sale = new Sale({ ...saleData, customerService: assignment._id, saleNo: await nextNumber('sale', 'S'), createdBy: req.user._id });
+      await recalcSale(sale);
+      if (incentive) await creditIncentive({ customer: customer._id, service: service._id, member: incentive.member, sale, amount: incentive.amount, by: req.user._id });
+    }
+    res.status(201).json({ assignment, sale });
   })
 );
 
@@ -291,9 +338,26 @@ router.delete(
     if (!assignment) throw new HttpError(404, 'Assigned service not found');
     if (await ScheduleItem.exists({ customerService: assignment._id, status: { $in: ['Scheduled', 'Completed'] } }))
       throw new HttpError(400, 'Some of its work is already scheduled — remove those from Schedule Management first');
+
+    // Its sale goes with it, unless money was already received on it.
+    const sales = await Sale.find({ customerService: assignment._id });
+    if (sales.length) {
+      if (!hasPermission(req, 'sales', 'delete')) throw new HttpError(403, 'This service has a sale entry — you need permission to delete sales');
+      if (await SalePayment.exists({ sale: { $in: sales.map((s) => s._id) } }))
+        throw new HttpError(400, `Sale ${sales.map((s) => s.saleNo).join(', ')} has payments — remove its payments first`);
+      // Incentive credited with the sale: one made by the sale is removed, an earlier referral goes back to pending.
+      const refs = await Referral.find({ sale: { $in: sales.map((s) => s._id) } });
+      for (const r of refs) {
+        const sale = sales.find((s) => s._id.equals(r.sale));
+        if (r.note === `Sale ${sale.saleNo}`) await r.deleteOne();
+        else await Object.assign(r, { status: 'Pending', incentive: 0, sale: undefined, convertedOn: undefined }).save();
+      }
+      await Sale.deleteMany({ _id: { $in: sales.map((s) => s._id) } });
+    }
+
     await ScheduleItem.deleteMany({ customerService: assignment._id });
     await assignment.deleteOne();
-    res.json({ message: 'Service removed' });
+    res.json({ message: sales.length ? `Service and sale ${sales.map((s) => s.saleNo).join(', ')} removed` : 'Service removed' });
   })
 );
 

@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import { Expense } from '../models/Expense.js';
+import { SalePayment } from '../models/SalePayment.js';
 import { getSetting } from '../models/Setting.js';
 import { protect, can } from '../middleware/auth.js';
 import { monthBounds } from '../services/payroll.js';
-import { expenseLimitOn } from '../services/collection.js';
+import { expenseLimitOn, splitNet } from '../services/collection.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
 import { isDayKey, todayKey } from '../utils/dates.js';
 
@@ -14,8 +15,10 @@ const isMonth = (m) => typeof m === 'string' && /^\d{4}-\d{2}$/.test(m);
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const MODES = ['Cash', 'Bank', 'UPI', 'Cheque'];
 
+// Period of the list: a day range (today = same from and to), a whole year, or a month.
 function range(q) {
-  if (isDayKey(q.from) && isDayKey(q.to)) return [q.from, q.to];
+  if (isDayKey(q.from) && isDayKey(q.to)) return q.from <= q.to ? [q.from, q.to] : [q.to, q.from];
+  if (/^\d{4}$/.test(q.year)) return [`${q.year}-01-01`, `${q.year}-12-31`];
   return monthBounds(isMonth(q.month) ? q.month : todayKey().slice(0, 7));
 }
 
@@ -44,6 +47,25 @@ async function dayStatus(date) {
   return { date, limit, spent, remaining: r2(limit - spent) };
 }
 
+// Per month ('YYYY-MM') between two day keys: entries, spent, limit (= month's net business − saving), remaining.
+async function monthSummary(from, to) {
+  const byMonth = { $substrBytes: ['$date', 0, 7] };
+  const [{ heads }, spent, net] = await Promise.all([
+    getSetting('collection'),
+    Expense.aggregate([{ $match: { date: { $gte: from, $lte: to } } }, { $group: { _id: byMonth, spent: { $sum: '$amount' }, count: { $sum: 1 } } }]),
+    SalePayment.aggregate([{ $match: { date: { $gte: from, $lte: to } } }, { $group: { _id: byMonth, net: { $sum: '$professionalPart' } } }]),
+  ]);
+  const months = {};
+  for (let m = from.slice(0, 7); m <= to.slice(0, 7); ) {
+    const s = spent.find((x) => x._id === m);
+    const limit = splitNet(r2(net.find((x) => x._id === m)?.net), heads).limit;
+    months[m] = { month: m, count: s?.count || 0, spent: r2(s?.spent), limit, remaining: r2(limit - r2(s?.spent)) };
+    const [y, mm] = m.split('-').map(Number);
+    m = mm === 12 ? `${y + 1}-01` : `${y}-${String(mm + 1).padStart(2, '0')}`;
+  }
+  return Object.values(months);
+}
+
 const overLimitNote = (s) => (s.remaining < 0 ? ` — ₹${Math.abs(s.remaining)} over the day's expense limit of ₹${s.limit}` : '');
 
 router.get(
@@ -53,10 +75,11 @@ router.get(
     const [from, to] = range(req.query);
     const filter = { date: { $gte: from, $lte: to } };
     if (req.query.account) filter.account = req.query.account;
-    const [data, accounts, today] = await Promise.all([
+    const [data, accounts, today, monthRows] = await Promise.all([
       Expense.find(filter).populate('createdBy', 'name').sort({ date: -1, createdAt: -1 }),
       knownAccounts(),
       dayStatus(todayKey()),
+      monthSummary(from, to),
     ]);
     const byAccount = {};
     for (const e of data) byAccount[e.account] = r2((byAccount[e.account] || 0) + e.amount);
@@ -64,8 +87,22 @@ router.get(
       from, to, data,
       accounts,
       today,
+      // Limit / spent for the whole selected period (not narrowed by account).
+      period: monthRows.reduce((a, m) => ({ count: a.count + m.count, spent: r2(a.spent + m.spent), limit: r2(a.limit + m.limit), remaining: r2(a.remaining + m.remaining) }), { count: 0, spent: 0, limit: 0, remaining: 0 }),
       stats: { count: data.length, total: r2(data.reduce((a, e) => a + e.amount, 0)), byAccount },
     });
+  })
+);
+
+// Month-wise count, spent and limit for a year (months after the current one are left out).
+router.get(
+  '/monthly',
+  can('expenses', 'view'),
+  asyncHandler(async (req, res) => {
+    const year = /^\d{4}$/.test(req.query.year) ? req.query.year : todayKey().slice(0, 4);
+    const last = year === todayKey().slice(0, 4) ? todayKey().slice(0, 7) : `${year}-12`;
+    if (last < `${year}-01`) return res.json({ year, data: [] });
+    res.json({ year, data: (await monthSummary(`${year}-01-01`, monthBounds(last)[1])).reverse() });
   })
 );
 

@@ -53,6 +53,15 @@ router.get(
   })
 );
 
+// Active partner names only, for pickers (customer "referred by").
+router.get(
+  '/options',
+  asyncHandler(async (_req, res) => {
+    const partners = await B2BPartner.find({ isActive: true }).select('name firmName percentage').sort({ name: 1 }).lean();
+    res.json({ data: partners });
+  })
+);
+
 // One partner: their sales (with commission) and payouts.
 router.get(
   '/:id',

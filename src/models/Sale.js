@@ -24,6 +24,8 @@ const saleSchema = new mongoose.Schema(
     b2bPartner: { type: mongoose.Schema.Types.ObjectId, ref: 'B2BPartner' },
     b2bPercent: { type: Number, default: 0, min: 0, max: 100 },
     b2bCommission: { type: Number, default: 0 },
+    referredBy: { type: String, trim: true }, // a person (not a B2B partner) who referred the work
+    referralAmount: { type: Number, default: 0, min: 0 }, // what that person gets
 
     notes: { type: String, trim: true },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

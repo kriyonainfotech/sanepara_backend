@@ -124,6 +124,16 @@ router.post(
   })
 );
 
+// Suggested incentive for a service at a professional fee (assign service → sale form).
+router.get(
+  '/suggest-incentive',
+  can('incentives', 'manage'),
+  asyncHandler(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.query.service)) throw new HttpError(400, 'Select a service');
+    res.json(await incentiveFor(req.query.service, { professionalFee: Number(req.query.fee) || 0 }));
+  })
+);
+
 // Suggested incentive for a referral (optionally against a sale).
 router.get(
   '/:id/suggest',
