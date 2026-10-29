@@ -12,6 +12,7 @@
     "dev:local": "node --env-file-if-exists=.env scripts/dev-local.js"
   },
   "dependencies": {
+    "@vercel/functions": "^3.10.4",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "express": "^5.3.0",
