@@ -7,6 +7,7 @@ import { nextNumber } from '../models/Counter.js';
 import { protect, can, hasPermission } from '../middleware/auth.js';
 import { buildSale, recalcSale } from '../services/sales.js';
 import { monthBounds } from '../services/payroll.js';
+import { pickBank } from '../services/banks.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
 import { isDayKey, todayKey } from '../utils/dates.js';
 
@@ -104,6 +105,7 @@ router.get(
       .populate('customer', 'businessName')
       .populate('sale', 'saleNo title')
       .populate('receivedBy', 'name')
+      .populate('bank', 'name')
       .sort({ date: -1, createdAt: -1 });
     const sum = (k) => Math.round(payments.reduce((a, p) => a + (p[k] || 0), 0) * 100) / 100;
     const byMode = {};
@@ -118,7 +120,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const sale = await populate(Sale.findById(req.params.id)).populate('createdBy', 'name');
     if (!sale) throw new HttpError(404, 'Sale not found');
-    const payments = await SalePayment.find({ sale: sale._id }).populate('receivedBy', 'name').sort({ date: 1, createdAt: 1 });
+    const payments = await SalePayment.find({ sale: sale._id }).populate('receivedBy', 'name').populate('bank', 'name').sort({ date: 1, createdAt: 1 });
     res.json({ data: sale, payments });
   })
 );
@@ -140,7 +142,7 @@ router.post(
     if (upfront > 0) {
       await SalePayment.create({
         sale: sale._id, customer: sale.customer, amount: upfront, date: sale.saleDate,
-        mode: MODES.includes(req.body.receivedMode) ? req.body.receivedMode : 'Cash', receivedBy: req.user._id,
+        mode: MODES.includes(req.body.receivedMode) ? req.body.receivedMode : 'Cash', bank: await pickBank(req.body.receivedBank), receivedBy: req.user._id,
       });
       await recalcSale(sale);
     }
@@ -196,6 +198,7 @@ router.post(
     await SalePayment.create({
       sale: sale._id, customer: sale.customer, amount, discount, date,
       mode: MODES.includes(req.body.mode) ? req.body.mode : 'Cash',
+      bank: amount > 0 ? await pickBank(req.body.bank) : undefined,
       reference: req.body.reference, note: req.body.note, receivedBy: req.user._id,
     });
     await recalcSale(sale);

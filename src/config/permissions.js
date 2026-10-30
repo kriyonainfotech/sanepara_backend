@@ -52,6 +52,7 @@ export const PERMISSION_CATALOG = [
       { key: 'b2b', label: 'B2B Partners', description: 'Partners, percentages, commission and payouts (Edit = pay out)', actions: CRUD },
       { key: 'collection', label: 'Collection', description: 'Collection, reserves, daily limit and goals', actions: [{ key: 'view', label: 'View' }, { key: 'manage', label: 'Manage' }] },
       { key: 'expenses', label: 'Expenses', description: 'Expense entries', actions: CRUD },
+      { key: 'banks', label: 'Bank & Cash', description: 'Bank / cash accounts, balances, statements, money in / out and transfers', actions: CRUD },
       { key: 'invoices', label: 'Invoices', description: 'Sales invoices', actions: [{ key: 'view', label: 'View' }, { key: 'create', label: 'Create' }] },
       { key: 'payment_qr', label: 'Payment QR', description: 'Generate UPI payment QR', actions: [{ key: 'use', label: 'Use' }] },
     ],

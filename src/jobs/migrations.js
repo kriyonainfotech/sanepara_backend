@@ -47,6 +47,14 @@ export async function runMigrations() {
     await RolePermission.collection.updateOne({ _id: doc._id }, { $set: set });
   }
 
+  // Bank & Cash is new: saved roles get it like Expenses (once only).
+  for (const doc of await RolePermission.collection.find({ banksAdded: { $ne: true } }).toArray()) {
+    const set = { banksAdded: true };
+    const exp = doc.permissions?.expenses || [];
+    if (exp.length && !doc.permissions.banks) set['permissions.banks'] = exp;
+    await RolePermission.collection.updateOne({ _id: doc._id }, { $set: set });
+  }
+
   // Scheduled tasks remember their service bunch.
   const unlinked = await Task.find({ scheduleItem: { $exists: true }, customerService: { $exists: false } });
   for (const t of unlinked) {

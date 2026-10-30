@@ -10,6 +10,7 @@ const salePaymentSchema = new mongoose.Schema(
     discount: { type: Number, default: 0, min: 0 }, // waived in this entry
     date: { type: String, required: true }, // 'YYYY-MM-DD'
     mode: { type: String, enum: ['Cash', 'Bank', 'UPI', 'Cheque'], default: 'Cash' },
+    bank: { type: mongoose.Schema.Types.ObjectId, ref: 'BankAccount' }, // account the money went into / out of
     reference: { type: String, trim: true }, // UTR / cheque no.
     note: { type: String, trim: true },
     govtPart: { type: Number, default: 0 },

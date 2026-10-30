@@ -7,6 +7,7 @@ import { protect, can } from '../middleware/auth.js';
 import { exceptionsBetween } from '../services/attendance.js';
 import { monthBounds, summarize } from '../services/payroll.js';
 import { incentivesByMember } from '../services/incentive.js';
+import { pickBank } from '../services/banks.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
 import { isDayKey, todayKey } from '../utils/dates.js';
 
@@ -62,7 +63,7 @@ router.get(
     const filter = {};
     if (isMonth(req.query.month)) filter.month = req.query.month;
     if (mongoose.isValidObjectId(req.query.userId)) filter.user = req.query.userId;
-    res.json({ data: await SalaryPayment.find(filter).populate('user', 'name').populate('paidBy', 'name').sort({ paidOn: -1, createdAt: -1 }) });
+    res.json({ data: await SalaryPayment.find(filter).populate('user', 'name').populate('paidBy', 'name').populate('bank', 'name').sort({ paidOn: -1, createdAt: -1 }) });
   })
 );
 
@@ -76,7 +77,7 @@ router.post(
     if (!(Number(amount) > 0)) throw new HttpError(400, 'Enter an amount');
     const payment = await SalaryPayment.create({
       user: userId, month, amount: Number(amount), paidOn: isDayKey(paidOn) ? paidOn : todayKey(),
-      mode: ['Cash', 'Bank', 'UPI', 'Cheque'].includes(mode) ? mode : 'Bank', note, paidBy: req.user._id,
+      mode: ['Cash', 'Bank', 'UPI', 'Cheque'].includes(mode) ? mode : 'Bank', bank: await pickBank(req.body.bank), note, paidBy: req.user._id,
     });
     res.status(201).json({ message: 'Salary payment recorded', data: payment });
   })

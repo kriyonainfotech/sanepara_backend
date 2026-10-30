@@ -5,6 +5,7 @@ import { getSetting } from '../models/Setting.js';
 import { protect, can } from '../middleware/auth.js';
 import { monthBounds } from '../services/payroll.js';
 import { expenseLimitOn, splitNet } from '../services/collection.js';
+import { pickBank } from '../services/banks.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
 import { isDayKey, todayKey } from '../utils/dates.js';
 
@@ -34,7 +35,7 @@ const clean = async (b) => {
   const date = isDayKey(b.date) ? b.date : todayKey();
   if (date > todayKey()) throw new HttpError(400, 'Expense date cannot be in the future');
   const text = (v) => String(v ?? '').trim();
-  return { date, amount, account, mode: MODES.includes(b.mode) ? b.mode : 'Cash', paidTo: text(b.paidTo), note: text(b.note) };
+  return { date, amount, account, mode: MODES.includes(b.mode) ? b.mode : 'Cash', bank: await pickBank(b.bank), paidTo: text(b.paidTo), note: text(b.note) };
 };
 
 // What is left of a day's limit (= net business − saving) after its expenses.
@@ -76,7 +77,7 @@ router.get(
     const filter = { date: { $gte: from, $lte: to } };
     if (req.query.account) filter.account = req.query.account;
     const [data, accounts, today, monthRows] = await Promise.all([
-      Expense.find(filter).populate('createdBy', 'name').sort({ date: -1, createdAt: -1 }),
+      Expense.find(filter).populate('createdBy', 'name').populate('bank', 'name kind').sort({ date: -1, createdAt: -1 }),
       knownAccounts(),
       dayStatus(todayKey()),
       monthSummary(from, to),

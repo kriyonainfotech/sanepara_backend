@@ -6,6 +6,7 @@ const expenseSchema = new mongoose.Schema(
     account: { type: String, required: [true, 'Select the expense account'], trim: true, maxlength: [50, 'Account name can be at most 50 characters'] },
     amount: { type: Number, required: true, min: 0.01 },
     mode: { type: String, enum: ['Cash', 'Bank', 'UPI', 'Cheque'], default: 'Cash' },
+    bank: { type: mongoose.Schema.Types.ObjectId, ref: 'BankAccount' }, // account the money went into / out of
     paidTo: { type: String, trim: true, maxlength: [100, 'Paid to can be at most 100 characters'] },
     note: { type: String, trim: true, maxlength: [300, 'Note can be at most 300 characters'] },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

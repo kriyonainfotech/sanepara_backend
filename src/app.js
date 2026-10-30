@@ -24,6 +24,7 @@ import referralRoutes from './routes/referrals.js';
 import sopRoutes from './routes/sops.js';
 import reportRoutes from './routes/reports.js';
 import complianceRoutes from './routes/compliance.js';
+import bankRoutes from './routes/banks.js';
 
 // CLIENT_URL can list several origins separated by commas; "*" matches one subdomain part,
 // e.g. Vercel preview URLs: https://sanepara-frontend-*-kriyona-infotechs-projects.vercel.app
@@ -76,6 +77,7 @@ export function createApp() {
   app.use('/api/sops', sopRoutes);
   app.use('/api/reports', reportRoutes);
   app.use('/api/compliance', complianceRoutes);
+  app.use('/api/banks', bankRoutes);
 
   app.use((_req, res) => res.status(404).json({ message: 'Route not found' }));
 

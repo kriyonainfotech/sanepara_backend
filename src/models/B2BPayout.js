@@ -6,6 +6,7 @@ const b2bPayoutSchema = new mongoose.Schema(
     amount: { type: Number, required: true, min: 1 },
     paidOn: { type: String, required: true }, // 'YYYY-MM-DD'
     mode: { type: String, enum: ['Cash', 'Bank', 'UPI', 'Cheque'], default: 'Bank' },
+    bank: { type: mongoose.Schema.Types.ObjectId, ref: 'BankAccount' }, // account the money went into / out of
     note: { type: String, trim: true },
     paidBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   },

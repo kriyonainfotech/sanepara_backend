@@ -5,6 +5,7 @@ import { B2BPayout } from '../models/B2BPayout.js';
 import { Sale } from '../models/Sale.js';
 import { protect, can } from '../middleware/auth.js';
 import { monthBounds } from '../services/payroll.js';
+import { pickBank } from '../services/banks.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
 import { isDayKey, todayKey } from '../utils/dates.js';
 
@@ -76,7 +77,7 @@ router.get(
     }
     const [sales, payouts] = await Promise.all([
       Sale.find(filter).populate('customer', 'businessName').populate('service', 'name').sort({ saleDate: -1 }).lean(),
-      B2BPayout.find({ partner: partner._id }).populate('paidBy', 'name').sort({ paidOn: -1 }).lean(),
+      B2BPayout.find({ partner: partner._id }).populate('paidBy', 'name').populate('bank', 'name').sort({ paidOn: -1 }).lean(),
     ]);
     res.json({ data: partner, sales, payouts });
   })
@@ -122,7 +123,7 @@ router.post(
     if (!(amount > 0)) throw new HttpError(400, 'Enter an amount');
     const payout = await B2BPayout.create({
       partner: partner._id, amount, paidOn: isDayKey(req.body.paidOn) ? req.body.paidOn : todayKey(),
-      mode: ['Cash', 'Bank', 'UPI', 'Cheque'].includes(req.body.mode) ? req.body.mode : 'Bank', note: req.body.note, paidBy: req.user._id,
+      mode: ['Cash', 'Bank', 'UPI', 'Cheque'].includes(req.body.mode) ? req.body.mode : 'Bank', bank: await pickBank(req.body.bank), note: req.body.note, paidBy: req.user._id,
     });
     res.status(201).json({ message: `₹${amount} paid to ${partner.name}`, data: payout });
   })
