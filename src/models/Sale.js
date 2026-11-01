@@ -7,6 +7,11 @@ const saleSchema = new mongoose.Schema(
     customerService: { type: mongoose.Schema.Types.ObjectId, ref: 'CustomerService' }, // the assigned service billed
     service: { type: mongoose.Schema.Types.ObjectId, ref: 'Service' },
     title: { type: String, required: true, trim: true }, // work description
+    // Firm (one of the customer's GST registrations) the work is billed to; '' = the customer
+    // itself. Payment still comes from the customer, who may pay for all their firms at once.
+    gstNumber: { type: String, default: '' },
+    firmName: { type: String, default: '' },
+    ownerName: { type: String, default: '' },
     saleDate: { type: String, required: true }, // 'YYYY-MM-DD'
 
     professionalFee: { type: Number, default: 0, min: 0 },

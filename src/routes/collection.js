@@ -95,6 +95,29 @@ router.get(
   })
 );
 
+// Where one day's collection came from: every payment received that day, with the customer,
+// the firm / bill it was for and the govt / professional split. ?date=YYYY-MM-DD
+router.get(
+  '/day',
+  can('collection', 'view'),
+  asyncHandler(async (req, res) => {
+    const date = String(req.query.date || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new HttpError(400, 'Pick a date');
+    const payments = await SalePayment.find({ date })
+      .select('amount discount govtPart professionalPart mode reference note receipt customer sale receivedBy bank createdAt')
+      .populate('customer', 'businessName contactPerson phone')
+      .populate({ path: 'sale', select: 'saleNo title firmName ownerName gstNumber service b2bPartner referredBy', populate: [{ path: 'service', select: 'name' }, { path: 'b2bPartner', select: 'name firmName' }] })
+      .populate('receivedBy', 'name')
+      .populate('bank', 'name')
+      .sort({ createdAt: 1 })
+      .lean();
+    const sum = (k) => r2(payments.reduce((a, p) => a + (p[k] || 0), 0));
+    const byMode = {};
+    for (const p of payments) if (p.amount) byMode[p.mode] = r2((byMode[p.mode] || 0) + p.amount);
+    res.json({ date, data: payments, totals: { amount: sum('amount'), govt: sum('govtPart'), net: sum('professionalPart'), discount: sum('discount'), byMode } });
+  })
+);
+
 router.put(
   '/settings',
   can('collection', 'manage'),

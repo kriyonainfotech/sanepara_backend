@@ -16,6 +16,8 @@ const salePaymentSchema = new mongoose.Schema(
     govtPart: { type: Number, default: 0 },
     professionalPart: { type: Number, default: 0 },
     receivedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    // One amount from the customer split over several sales (e.g. all their firms) shares a receipt no.
+    receipt: { type: String },
   },
   { timestamps: true }
 );
@@ -23,5 +25,6 @@ const salePaymentSchema = new mongoose.Schema(
 salePaymentSchema.index({ date: -1 });
 salePaymentSchema.index({ sale: 1, date: 1 });
 salePaymentSchema.index({ customer: 1, date: 1 });
+salePaymentSchema.index({ receipt: 1 }, { sparse: true });
 
 export const SalePayment = mongoose.model('SalePayment', salePaymentSchema);

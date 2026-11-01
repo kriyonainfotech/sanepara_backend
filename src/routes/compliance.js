@@ -5,6 +5,7 @@ import { CustomerService } from '../models/CustomerService.js';
 import { GstFiling } from '../models/GstFiling.js';
 import { getSetting, setSetting } from '../models/Setting.js';
 import { COMPLIANCE_CATEGORIES, COMPLIANCE_RULES } from '../config/compliance.js';
+import { isReturnFiled, returnStatus } from '../services/gstReturns.js';
 import { protect, can } from '../middleware/auth.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
 import { addDaysKey, isDayKey, todayKey } from '../utils/dates.js';
@@ -52,6 +53,7 @@ async function occurrences(from, to) {
         period: r.period?.(original) || '',
         workPeriod: r.workPeriod?.(original) || null,
         appliesTo: r.appliesTo || null,
+        step: r.step || null,
         done: doneSet.has(id),
       });
     }
@@ -78,22 +80,20 @@ async function occurrences(from, to) {
     const periods = [...new Set(gst.map((o) => o.workPeriod).filter(Boolean))];
     const [running, work] = await Promise.all([
       GstFiling.aggregate([{ $match: { isRunning: true } }, { $group: { _id: '$returnType', count: { $sum: 1 } } }]),
-      periods.length
-        ? CustomerService.aggregate([
-            { $match: { period: { $in: periods }, status: { $ne: 'cancelled' } } },
-            { $group: { _id: { period: '$period', type: '$gstReturnType' }, total: { $sum: 1 }, completed: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } } } },
-          ])
-        : [],
+      periods.length ? CustomerService.find({ period: { $in: periods }, status: { $ne: 'cancelled' } }).select('period gstReturnType status').lean() : [],
     ]);
+    // GSTR-1 / GSTR-3B count only their own steps, so a customer whose GSTR-1 is filed but
+    // 3B is not shows as done for GSTR-1.
+    const info = gst.some((o) => o.step) ? await returnStatus(work) : new Map();
     const count = Object.fromEntries(running.map((r) => [r._id, r.count]));
     for (const o of gst) {
       o.customers = o.appliesTo.reduce((a, t) => a + (count[t] || 0), 0);
       if (!o.workPeriod) continue;
-      const rows = work.filter((w) => w._id.period === o.workPeriod && o.appliesTo.includes(w._id.type));
-      const total = rows.reduce((a, w) => a + w.total, 0);
-      if (!total) continue;
-      o.progress = { total, completed: rows.reduce((a, w) => a + w.completed, 0) };
-      if (o.progress.completed === total) o.done = o.autoDone = true;
+      const rows = work.filter((w) => w.period === o.workPeriod && o.appliesTo.includes(w.gstReturnType));
+      if (!rows.length) continue;
+      const completed = rows.filter((w) => (o.step ? isReturnFiled(w, info.get(String(w._id)), o.step) : w.status === 'completed')).length;
+      o.progress = { total: rows.length, completed };
+      if (completed === rows.length) o.done = o.autoDone = true;
     }
   }
   return list.sort((a, b) => a.date.localeCompare(b.date) || a.title.localeCompare(b.title));

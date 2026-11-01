@@ -59,11 +59,13 @@ export async function createGstWork({ manual = false, userId } = {}) {
         assignedBy: by,
         gstFiling: f._id,
         gstReturnType: f.returnType,
+        gstNumber: f.gstNumber || '',
+        firmName: f.firmName || '',
         period,
         periodLabel: label,
       });
       await createItemsForAssignment(cs, service, by);
-      await ScheduleItem.updateMany({ customerService: cs._id }, { description: `${f.returnType} GST return for ${label}` });
+      await ScheduleItem.updateMany({ customerService: cs._id }, { description: `${f.returnType} GST return for ${label}${f.gstNumber ? ` · ${[f.firmName, f.gstNumber].filter(Boolean).join(' · ')}` : ''}` });
 
       if (assignee) {
         const items = await ScheduleItem.find({ customerService: cs._id }).sort({ order: 1 });

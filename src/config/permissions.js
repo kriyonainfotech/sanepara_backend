@@ -35,7 +35,7 @@ export const PERMISSION_CATALOG = [
         description: "Everyone's tasks, daily task rules and checklist templates",
         actions: [...CRUD, { key: 'rituals', label: 'Daily task rules' }, { key: 'templates', label: 'Checklist templates' }],
       },
-      { key: 'gst_filing', label: 'Running GST Filing', description: 'Stop / resume filing for customers, monthly GST work settings', actions: [{ key: 'view', label: 'View' }, { key: 'manage', label: 'Stop / resume' }] },
+      { key: 'gst_filing', label: 'Running GST Filing', description: 'Stop / resume filing for customers, monthly GST work settings', actions: [{ key: 'view', label: 'View' }, { key: 'manage', label: 'Stop / resume' }, { key: 'credentials', label: 'GST portal login (see / save)' }] },
       { key: 'compliance', label: 'Compliance Calendar', description: 'GST / ITR / TDS / trademark due dates and alerts', actions: [{ key: 'view', label: 'View' }, { key: 'manage', label: 'Add / mark done / move dates' }] },
       {
         key: 'reminders',

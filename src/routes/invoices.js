@@ -39,7 +39,7 @@ export function ensureInvoices() {
 const populateSale = {
   path: 'sale',
   populate: [
-    { path: 'customer', select: 'businessName contactPerson phone email gstNumber address' },
+    { path: 'customer', select: 'businessName contactPerson phone email gstNumber gsts address' },
     { path: 'service', select: 'name' },
   ],
 };
@@ -57,7 +57,7 @@ router.get(
     if (req.query.search?.trim()) {
       const rx = { $regex: escapeRegex(req.query.search.trim()), $options: 'i' };
       const customers = await Customer.find({ $or: [{ businessName: rx }, { phone: rx }, { gstNumber: rx }] }).distinct('_id');
-      const sales = await Sale.find({ $or: [{ customer: { $in: customers } }, { saleNo: rx }, { title: rx }] }).distinct('_id');
+      const sales = await Sale.find({ $or: [{ customer: { $in: customers } }, { saleNo: rx }, { title: rx }, { firmName: rx }, { gstNumber: rx }] }).distinct('_id');
       filter.$or = [{ invoiceNo: rx }, { sale: { $in: sales } }];
     }
     if (mongoose.isValidObjectId(req.query.customer)) {

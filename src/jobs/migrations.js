@@ -1,5 +1,7 @@
 import mongoose from 'mongoose';
+import { Customer } from '../models/Customer.js';
 import { CustomerService } from '../models/CustomerService.js';
+import { GstFiling } from '../models/GstFiling.js';
 import { ScheduleItem } from '../models/ScheduleItem.js';
 import { Service } from '../models/Service.js';
 import { RolePermission } from '../models/RolePermission.js';
@@ -54,6 +56,27 @@ export async function runMigrations() {
     if (exp.length && !doc.permissions.banks) set['permissions.banks'] = exp;
     await RolePermission.collection.updateOne({ _id: doc._id }, { $set: set });
   }
+
+  // Customers can hold several GST numbers: the single one moves into the list, and each GST
+  // filing remembers its GSTIN (one filing per GSTIN instead of one per customer).
+  await Customer.collection.updateMany({ gsts: { $exists: false } }, [
+    {
+      $set: {
+        gsts: {
+          $cond: [
+            { $gt: [{ $strLenCP: { $ifNull: ['$gstNumber', ''] } }, 0] },
+            [{ _id: '$_id', gstNumber: '$gstNumber', firmName: '$businessName', address: { $ifNull: ['$address', ''] } }],
+            [],
+          ],
+        },
+      },
+    },
+  ]);
+  for (const f of await GstFiling.collection.find({ gstNumber: { $exists: false } }).toArray()) {
+    const c = await Customer.collection.findOne({ _id: f.customer }, { projection: { gstNumber: 1, businessName: 1 } });
+    await GstFiling.collection.updateOne({ _id: f._id }, { $set: { gstNumber: c?.gstNumber || '', firmName: c?.gstNumber ? c.businessName : '' } });
+  }
+  await GstFiling.syncIndexes();
 
   // Scheduled tasks remember their service bunch.
   const unlinked = await Task.find({ scheduleItem: { $exists: true }, customerService: { $exists: false } });

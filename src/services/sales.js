@@ -7,6 +7,7 @@ import { B2BPartner } from '../models/B2BPartner.js';
 import { User } from '../models/User.js';
 import { HttpError } from '../utils/asyncHandler.js';
 import { isDayKey, todayKey } from '../utils/dates.js';
+import { firmOf } from '../utils/gst.js';
 
 const money = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -52,15 +53,19 @@ export async function recalcSale(saleOrId) {
 export async function buildSale(body, existing) {
   const data = {};
   const customerId = body.customer ?? existing?.customer;
-  if (!mongoose.isValidObjectId(customerId) || !(await Customer.exists({ _id: customerId }))) throw new HttpError(400, 'Select a customer');
+  const customer = mongoose.isValidObjectId(customerId) ? await Customer.findById(customerId).select('gsts').lean() : null;
+  if (!customer) throw new HttpError(400, 'Select a customer');
   data.customer = customerId;
 
+  // Firm billed: the assigned service's firm, else the chosen one, else what the sale had.
+  let gstNumber = body.gstNumber !== undefined ? body.gstNumber : existing?.gstNumber || '';
   if (body.customerService !== undefined) {
     if (body.customerService) {
       const cs = await CustomerService.findById(body.customerService);
       if (!cs || String(cs.customer) !== String(customerId)) throw new HttpError(400, 'That service is not assigned to this customer');
       data.customerService = cs._id;
       data.service = cs.service;
+      if (cs.gstNumber) gstNumber = cs.gstNumber;
     } else {
       data.customerService = undefined;
       data.service = mongoose.isValidObjectId(body.service) ? body.service : undefined;
@@ -68,6 +73,8 @@ export async function buildSale(body, existing) {
   } else if (body.service !== undefined) {
     data.service = mongoose.isValidObjectId(body.service) ? body.service : undefined;
   }
+
+  Object.assign(data, firmOf(customer, gstNumber));
 
   const title = (body.title ?? existing?.title)?.trim();
   if (!title) throw new HttpError(400, 'Add what the sale is for');

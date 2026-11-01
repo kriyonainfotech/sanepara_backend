@@ -5,6 +5,8 @@
 //  - workPeriod(day): the GST work period ('YYYY-MM' / 'YYYY-Qn') it is for, to show
 //    progress of the monthly GST work (jobs/gstWork.js)
 //  - period(day): label of what the return is for
+//  - step: the return ('gstr1' / 'gstr3b') whose own steps of the GST work give the progress
+//    (services/gstReturns.js); without it the whole GST work counts
 import { periodLabel, prevMonthOf, prevQuarterOf } from '../utils/periods.js';
 
 const QUARTER_START = [1, 4, 7, 10];
@@ -24,12 +26,12 @@ export const COMPLIANCE_CATEGORIES = ['GST', 'Income Tax', 'TDS', 'Trademark', '
 
 export const COMPLIANCE_RULES = [
   // GST — monthly filers
-  { key: 'gstr1', title: 'GSTR-1', category: 'GST', day: 11, appliesTo: ['Monthly'], description: 'Sales (outward supplies) return of monthly filers.', ...monthPeriod },
-  { key: 'gstr3b', title: 'GSTR-3B', category: 'GST', day: 20, appliesTo: ['Monthly'], description: 'Summary return and tax payment of monthly filers.', ...monthPeriod },
+  { key: 'gstr1', title: 'GSTR-1', category: 'GST', day: 11, step: 'gstr1', appliesTo: ['Monthly'], description: 'Sales (outward supplies) return of monthly filers.', ...monthPeriod },
+  { key: 'gstr3b', title: 'GSTR-3B', category: 'GST', day: 20, step: 'gstr3b', appliesTo: ['Monthly'], description: 'Summary return and tax payment of monthly filers.', ...monthPeriod },
   // GST — QRMP (quarterly) filers
   { key: 'pmt06', title: 'PMT-06 tax payment', category: 'GST', day: 25, months: NOT_QUARTER_START, appliesTo: [QRMP], description: 'Monthly tax payment by QRMP filers for the first two months of the quarter.', ...monthPeriod },
-  { key: 'gstr1q', title: 'GSTR-1 (QRMP)', category: 'GST', day: 13, months: QUARTER_START, appliesTo: [QRMP], description: 'Quarterly sales return of QRMP filers.', ...quarterPeriod },
-  { key: 'gstr3bq', title: 'GSTR-3B (QRMP)', category: 'GST', day: 22, months: QUARTER_START, appliesTo: [QRMP], description: 'Quarterly summary return. 22nd for Gujarat, Maharashtra and other Category-I states; 24th for Category-II states.', ...quarterPeriod },
+  { key: 'gstr1q', title: 'GSTR-1 (QRMP)', category: 'GST', day: 13, step: 'gstr1', months: QUARTER_START, appliesTo: [QRMP], description: 'Quarterly sales return of QRMP filers.', ...quarterPeriod },
+  { key: 'gstr3bq', title: 'GSTR-3B (QRMP)', category: 'GST', day: 22, step: 'gstr3b', months: QUARTER_START, appliesTo: [QRMP], description: 'Quarterly summary return. 22nd for Gujarat, Maharashtra and other Category-I states; 24th for Category-II states.', ...quarterPeriod },
   // GST — Composition
   { key: 'cmp08', title: 'CMP-08', category: 'GST', day: 18, months: QUARTER_START, appliesTo: ['Composition'], description: 'Quarterly tax payment statement of composition dealers.', ...quarterPeriod },
   { key: 'gstr4', title: 'GSTR-4 (annual)', category: 'GST', day: 30, months: [4], appliesTo: ['Composition'], description: 'Annual return of composition dealers.', period: lastFy },

@@ -18,6 +18,9 @@ const customerServiceSchema = new mongoose.Schema(
     gstReturnType: { type: String },
     period: { type: String }, // 'YYYY-MM' or 'YYYY-Qn'
     periodLabel: { type: String }, // 'Sep 2026', 'Jul–Sep 2026'
+    // Firm (one of the customer's GST registrations) the work is for; '' = the customer itself.
+    gstNumber: { type: String, default: '' },
+    firmName: { type: String, default: '' },
   },
   { timestamps: true }
 );

@@ -7,8 +7,11 @@ import { getSetting, setSetting } from '../models/Setting.js';
 import { createGstWork } from '../jobs/gstWork.js';
 import { protect, can } from '../middleware/auth.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
-import { isDayKey, todayKey } from '../utils/dates.js';
-import { periodLabel, prevMonthOf } from '../utils/periods.js';
+import { addDaysKey, isDayKey, todayKey } from '../utils/dates.js';
+import { isQuarterly, periodEnd, periodLabel, prevMonthOf } from '../utils/periods.js';
+import { COMPLIANCE_RULES } from '../config/compliance.js';
+import { returnStatus } from '../services/gstReturns.js';
+import { encrypt, decrypt } from '../utils/secretBox.js';
 
 const router = Router();
 router.use(protect);
@@ -29,15 +32,22 @@ router.get(
     if (req.query.status === 'stopped') filter.isRunning = false;
     if (req.query.search?.trim()) {
       const rx = { $regex: escapeRegex(req.query.search.trim()), $options: 'i' };
-      filter.customer = { $in: await Customer.find({ $or: [{ businessName: rx }, { phone: rx }, { gstNumber: rx }, { contactPerson: rx }] }).distinct('_id') };
+      filter.$or = [
+        { customer: { $in: await Customer.find({ $or: [{ businessName: rx }, { phone: rx }, { contactPerson: rx }] }).distinct('_id') } },
+        { gstNumber: rx },
+        { firmName: rx },
+      ];
     }
-    const [data, running, stopped] = await Promise.all([
+    const [filings, running, stopped, withLogin] = await Promise.all([
       populate(GstFiling.find(filter).sort({ isRunning: -1, updatedAt: -1 })),
       GstFiling.countDocuments({ isRunning: true }),
       GstFiling.countDocuments({ isRunning: false }),
+      GstFiling.find({ 'portalLogin.password': { $nin: [null, ''] } }).distinct('_id'),
     ]);
+    const saved = new Set(withLogin.map(String));
+    const data = filings.map((f) => ({ ...f.toObject(), hasLogin: saved.has(String(f._id)) }));
     const byType = await GstFiling.aggregate([{ $match: { isRunning: true } }, { $group: { _id: '$returnType', count: { $sum: 1 } } }]);
-    res.json({ data, stats: { running, stopped, byType: Object.fromEntries(byType.map((t) => [t._id, t.count])) } });
+    res.json({ data, stats:{ running, stopped, byType: Object.fromEntries(byType.map((t) => [t._id, t.count])) } });
   })
 );
 
@@ -79,6 +89,91 @@ router.put(
   })
 );
 
+// GST Return Tracker: one row per customer with its GSTR-1 and GSTR-3B for a month (quarterly
+// filers: the quarter that month is in). ?month=YYYY-MM&status=pending|filed&member=&search=
+const RETURN_RULES = { Monthly: { gstr1: 'gstr1', gstr3b: 'gstr3b' }, 'Quarterly (QRMP)': { gstr1: 'gstr1q', gstr3b: 'gstr3bq' } };
+
+router.get(
+  '/tracker',
+  can('gst_filing', 'view'),
+  asyncHandler(async (req, res) => {
+    const today = todayKey();
+    const month = /^\d{4}-(0[1-9]|1[0-2])$/.test(req.query.month || '') ? req.query.month : prevMonthOf(today);
+    const quarter = `${month.slice(0, 4)}-Q${Math.ceil(Number(month.slice(5)) / 3)}`;
+    const periodOf = (type) => (isQuarterly(type) ? quarter : month);
+
+    const [filings, work, { overrides = {} }] = await Promise.all([
+      GstFiling.find().populate('customer', 'businessName contactPerson phone gstNumber').lean(),
+      CustomerService.find({ gstFiling: { $exists: true }, period: { $in: [month, quarter] }, status: { $ne: 'cancelled' } }).sort({ createdAt: -1 }).lean(),
+      getSetting('compliance'),
+    ]);
+    const info = await returnStatus(work);
+
+    // Due date of a return for the period, with any government extension from the Compliance Calendar.
+    const dueOf = (type, period, kind) => {
+      const rule = COMPLIANCE_RULES.find((r) => r.key === RETURN_RULES[type]?.[kind]);
+      if (!rule) return null;
+      const original = `${addDaysKey(periodEnd(period), 1).slice(0, 7)}-${String(rule.day).padStart(2, '0')}`;
+      return overrides[`${rule.key}:${original}`] || original;
+    };
+
+    const rows = [];
+    for (const f of filings) {
+      if (!f.customer) continue;
+      // Latest work of this filing for the period (the return type may have changed since).
+      const cs = work.find((w) => String(w.gstFiling) === String(f._id) && w.period === periodOf(w.gstReturnType));
+      const type = cs?.gstReturnType || f.returnType;
+      const period = periodOf(type);
+      if (!cs && (!f.isRunning || f.startedOn > periodEnd(period))) continue;
+      const i = cs ? info.get(String(cs._id)) : null;
+      const ret = (kind) => {
+        if (!RETURN_RULES[type]) return { status: 'na' };
+        const dueOn = dueOf(type, period, kind);
+        if (!cs) return { status: 'nowork', dueOn };
+        return { ...(i[kind] || { status: cs.status === 'completed' ? 'filed' : 'pending', fromWork: true }), dueOn };
+      };
+      const gstr1 = ret('gstr1');
+      const gstr3b = ret('gstr3b');
+      rows.push({
+        filingId: f._id,
+        customer: f.customer,
+        gstNumber: f.gstNumber,
+        firmName: f.firmName,
+        returnType: type,
+        isRunning: f.isRunning,
+        period,
+        periodLabel: periodLabel(period),
+        work: cs ? { _id: cs._id, status: cs.status, steps: i.steps } : null,
+        members: i?.members || [],
+        gstr1,
+        gstr3b,
+        done: cs ? (RETURN_RULES[type] ? [gstr1, gstr3b].every((r) => r.status === 'filed') : cs.status === 'completed') : false,
+      });
+    }
+
+    let list = rows;
+    if (mongoose.isValidObjectId(req.query.member)) list = list.filter((r) => r.members.some((m) => String(m._id) === req.query.member));
+    if (req.query.search?.trim()) {
+      const q = req.query.search.trim().toLowerCase();
+      list = list.filter((r) => [r.customer.businessName, r.gstNumber, r.firmName, r.customer.phone, r.customer.contactPerson].some((v) => v?.toLowerCase().includes(q)));
+    }
+    const applies = list.filter((r) => RETURN_RULES[r.returnType]);
+    const stats = {
+      total: list.length,
+      done: list.filter((r) => r.done).length,
+      noWork: list.filter((r) => !r.work).length,
+      returns: applies.length,
+      gstr1Filed: applies.filter((r) => r.gstr1.status === 'filed').length,
+      gstr3bFiled: applies.filter((r) => r.gstr3b.status === 'filed').length,
+    };
+    if (req.query.status === 'pending') list = list.filter((r) => !r.done);
+    if (req.query.status === 'filed') list = list.filter((r) => r.done);
+    list.sort((a, b) => a.done - b.done || a.customer.businessName.localeCompare(b.customer.businessName) || a.gstNumber.localeCompare(b.gstNumber));
+
+    res.json({ today, month, monthLabel: periodLabel(month), quarter, quarterLabel: periodLabel(quarter), stats, data: list });
+  })
+);
+
 // Create this month's work now instead of waiting for the set day.
 router.post(
   '/work/run',
@@ -96,11 +191,18 @@ router.post(
   can('gst_filing', 'manage'),
   asyncHandler(async (req, res) => {
     const { customer, returnType, startedOn, notes } = req.body;
-    if (!mongoose.isValidObjectId(customer) || !(await Customer.exists({ _id: customer }))) throw new HttpError(400, 'Select a customer');
-    if (await GstFiling.exists({ customer })) throw new HttpError(400, 'This customer is already in the GST filing list');
+    const c = mongoose.isValidObjectId(customer) ? await Customer.findById(customer).select('gsts').lean() : null;
+    if (!c) throw new HttpError(400, 'Select a customer');
+    // One filing per GSTIN of the customer; a customer without any GSTIN saved can have one filing.
+    const gstNumber = String(req.body.gstNumber || '').toUpperCase().trim();
+    const gst = c.gsts?.find((g) => g.gstNumber === gstNumber);
+    if (c.gsts?.length ? !gst : gstNumber) throw new HttpError(400, 'Select one of the customer’s GST numbers');
+    if (await GstFiling.exists({ customer, gstNumber })) throw new HttpError(400, gstNumber ? `${gstNumber} is already in the GST filing list` : 'This customer is already in the GST filing list');
     const day = isDayKey(startedOn) ? startedOn : todayKey();
     const filing = await GstFiling.create({
       customer,
+      gstNumber,
+      firmName: gst?.firmName || '',
       returnType: RETURN_TYPES.includes(returnType) ? returnType : 'Monthly',
       startedOn: day,
       notes,
@@ -121,6 +223,35 @@ router.put(
     if (req.body.notes !== undefined) filing.notes = req.body.notes;
     await filing.save();
     res.json({ message: 'Saved', data: await populate(GstFiling.findById(filing._id)) });
+  })
+);
+
+// GST portal login of the customer. Needs GST Filing → GST portal login.
+router.get(
+  '/:id/login',
+  can('gst_filing', 'credentials'),
+  asyncHandler(async (req, res) => {
+    const filing = await GstFiling.findById(req.params.id).select('+portalLogin').populate('portalLogin.updatedBy', 'name');
+    if (!filing) throw new HttpError(404, 'Not found');
+    const l = filing.portalLogin || {};
+    const password = decrypt(l.password);
+    res.json({
+      data: { username: l.username || '', password: password || '', unreadable: password === null, updatedAt: l.updatedAt, updatedBy: l.updatedBy?.name },
+    });
+  })
+);
+
+router.put(
+  '/:id/login',
+  can('gst_filing', 'credentials'),
+  asyncHandler(async (req, res) => {
+    const filing = await GstFiling.findById(req.params.id).select('+portalLogin');
+    if (!filing) throw new HttpError(404, 'Not found');
+    const username = String(req.body.username || '').trim().slice(0, 100);
+    const password = String(req.body.password || '').slice(0, 100);
+    filing.portalLogin = username || password ? { username, password: encrypt(password), updatedAt: new Date(), updatedBy: req.user._id } : undefined;
+    await filing.save();
+    res.json({ message: username || password ? 'GST login saved' : 'GST login removed' });
   })
 );
 
