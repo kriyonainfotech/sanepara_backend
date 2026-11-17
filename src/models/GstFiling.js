@@ -22,6 +22,17 @@ const gstFilingSchema = new mongoose.Schema(
       },
     ],
     addedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    // Manual return status overrides or quick filing marks
+    returnsLog: [
+      {
+        period: { type: String, required: true },
+        kind: { type: String, enum: ['gstr1', 'gstr3b'], required: true },
+        status: { type: String, enum: ['filed', 'pending'], default: 'filed' },
+        filedOn: { type: String },
+        updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        updatedAt: { type: Date, default: Date.now },
+      },
+    ],
     // Periods whose GST work was already created, so deleting that work does not bring it back.
     workPeriods: [String],
     // GST portal login. Password is encrypted (utils/secretBox.js); only returned by

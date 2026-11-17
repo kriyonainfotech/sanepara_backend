@@ -13,6 +13,7 @@ import { monthBounds } from '../services/payroll.js';
 import { pickBank } from '../services/banks.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
 import { isDayKey, todayKey } from '../utils/dates.js';
+import { firmOf } from '../utils/gst.js';
 
 const router = Router();
 router.use(protect);
@@ -30,6 +31,7 @@ const populate = (q) =>
 
 // Date range from ?month= or ?from=&to= (defaults to this month).
 function range(q) {
+  if (q.month === 'all' || q.all === 'true' || (q.status === 'open' && q.allPending === 'true')) return ['2000-01-01', '2099-12-31'];
   if (isDayKey(q.from) && isDayKey(q.to)) return [q.from, q.to];
   return monthBounds(isMonth(q.month) ? q.month : todayKey().slice(0, 7));
 }
@@ -182,7 +184,131 @@ router.delete(
 // ---------- payments ----------
 
 const canCollect = (req, _res, next) =>
-  hasPermission(req, 'sales', 'collect') || hasPermission(req, 'sales', 'edit') ? next() : next(new HttpError(403, 'You do not have access to this'));
+  hasPermission(req, 'sales', 'collect') || hasPermission(req, 'sales', 'edit') || hasPermission(req, 'sales', 'create')
+    ? next()
+    : next(new HttpError(403, 'You do not have access to this'));
+
+// Direct payment from a customer: can link to an existing sale, or create a sale and pay it,
+// or record as an advance / on-account payment.
+router.post(
+  '/direct-payment',
+  canCollect,
+  asyncHandler(async (req, res) => {
+    const b = req.body;
+    if (!mongoose.isValidObjectId(b.customer)) throw new HttpError(400, 'Select a customer');
+    const customer = await Customer.findById(b.customer);
+    if (!customer) throw new HttpError(404, 'Customer not found');
+
+    const amount = Math.round((Number(b.amount) || 0) * 100) / 100;
+    if (amount <= 0) throw new HttpError(400, 'Enter the amount received');
+    const govtFee = Math.max(0, Math.round((Number(b.govtFee) || 0) * 100) / 100);
+    if (govtFee > amount) throw new HttpError(400, 'Government fee cannot exceed the amount received');
+
+    const date = isDayKey(b.date) ? b.date : todayKey();
+    if (date > todayKey()) throw new HttpError(400, 'Payment date cannot be in the future');
+
+    const mode = MODES.includes(b.mode) ? b.mode : 'Cash';
+    const bank = amount > 0 ? await pickBank(b.bank) : undefined;
+    const note = b.note?.trim();
+    const reference = b.reference?.trim();
+
+    // 1. If an existing sale is specified, record payment on it
+    if (b.sale && mongoose.isValidObjectId(b.sale)) {
+      const sale = await Sale.findById(b.sale);
+      if (!sale) throw new HttpError(404, 'Sale not found');
+      if (amount > sale.balance + 0.001) throw new HttpError(400, `Only ₹${sale.balance} is pending on this sale`);
+      const payment = await SalePayment.create({
+        sale: sale._id,
+        customer: sale.customer,
+        amount,
+        date,
+        mode,
+        bank,
+        reference,
+        note,
+        receivedBy: req.user._id,
+      });
+      await recalcSale(sale);
+      return res.status(201).json({ message: `₹${amount} received on ${sale.saleNo}`, data: payment, sale });
+    }
+
+    const isAdvance = b.isAdvance === true;
+
+    // 2. Direct advance / on-account payment (no sale created)
+    if (isAdvance) {
+      const payment = await SalePayment.create({
+        customer: customer._id,
+        amount,
+        govtPart: govtFee,
+        professionalPart: amount - govtFee,
+        date,
+        mode,
+        bank,
+        reference,
+        note: note || 'Advance payment',
+        receivedBy: req.user._id,
+      });
+      return res.status(201).json({ message: `₹${amount} advance payment recorded`, data: payment });
+    }
+
+    // 3. Direct payment with sale created
+    const totalAmount = Math.max(amount, Math.round((Number(b.totalAmount) || amount) * 100) / 100);
+    const professionalFee = Math.max(0, Math.round((totalAmount - govtFee) * 100) / 100);
+
+    let title = (b.title || '').trim();
+    let serviceId = mongoose.isValidObjectId(b.service) ? b.service : undefined;
+    if (serviceId) {
+      const s = await Service.findById(serviceId);
+      if (s && !title) title = s.name;
+    }
+    if (!title) title = 'Direct Payment';
+
+    let firmData = { gstNumber: '', firmName: '', ownerName: '' };
+    if (b.gstNumber) {
+      firmData = firmOf(customer, b.gstNumber);
+    }
+
+    const sale = new Sale({
+      saleNo: await nextNumber('sale', 'S'),
+      customer: customer._id,
+      service: serviceId,
+      customerService: mongoose.isValidObjectId(b.customerService) ? b.customerService : undefined,
+      title,
+      ...firmData,
+      saleDate: date,
+      professionalFee,
+      govtFee,
+      totalAmount,
+      soldBy: mongoose.isValidObjectId(b.soldBy) ? b.soldBy : req.user._id,
+      b2bPartner: mongoose.isValidObjectId(b.b2bPartner) ? b.b2bPartner : undefined,
+      b2bPercent: Number(b.b2bPercent) || 0,
+      referredBy: b.referredBy?.trim() || '',
+      referralAmount: Number(b.referralAmount) || 0,
+      notes: note,
+      createdBy: req.user._id,
+    });
+    await recalcSale(sale);
+
+    const payment = await SalePayment.create({
+      sale: sale._id,
+      customer: customer._id,
+      amount,
+      date,
+      mode,
+      bank,
+      reference,
+      note,
+      receivedBy: req.user._id,
+    });
+    await recalcSale(sale);
+
+    res.status(201).json({
+      message: `₹${amount} recorded on ${sale.saleNo}${sale.balance > 0 ? ` (₹${sale.balance} pending)` : ''}`,
+      data: payment,
+      sale,
+    });
+  })
+);
 
 router.post(
   '/:id/payments',
@@ -277,6 +403,19 @@ router.delete(
     await SalePayment.deleteMany({ receipt: req.params.receipt });
     for (const id of new Set(payments.map((p) => String(p.sale)))) await recalcSale(id);
     res.json({ message: `Receipt ${req.params.receipt} removed` });
+  })
+);
+
+router.delete(
+  '/payments/:paymentId',
+  canCollect,
+  asyncHandler(async (req, res) => {
+    const p = await SalePayment.findById(req.params.paymentId);
+    if (!p) throw new HttpError(404, 'Payment not found');
+    const saleId = p.sale;
+    await p.deleteOne();
+    if (saleId) await recalcSale(saleId);
+    res.json({ message: 'Payment removed' });
   })
 );
 

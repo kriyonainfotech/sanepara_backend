@@ -10,7 +10,10 @@ import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
 import { addDaysKey, isDayKey, todayKey } from '../utils/dates.js';
 import { isQuarterly, periodEnd, periodLabel, prevMonthOf } from '../utils/periods.js';
 import { COMPLIANCE_RULES } from '../config/compliance.js';
-import { returnStatus } from '../services/gstReturns.js';
+import { ScheduleItem } from '../models/ScheduleItem.js';
+import { Task } from '../models/Task.js';
+import { returnOfStep, returnStatus } from '../services/gstReturns.js';
+import { syncCustomerService } from '../services/scheduleSync.js';
 import { encrypt, decrypt } from '../utils/secretBox.js';
 
 const router = Router();
@@ -129,7 +132,16 @@ router.get(
       const ret = (kind) => {
         if (!RETURN_RULES[type]) return { status: 'na' };
         const dueOn = dueOf(type, period, kind);
-        if (!cs) return { status: 'nowork', dueOn };
+        const log = (f.returnsLog || []).find((l) => l.period === period && l.kind === kind);
+        if (log) {
+          return {
+            status: log.status,
+            filedOn: log.status === 'filed' ? log.filedOn : null,
+            dueOn,
+            manual: true,
+          };
+        }
+        if (!cs) return { status: 'pending', dueOn, noWork: true };
         return { ...(i[kind] || { status: cs.status === 'completed' ? 'filed' : 'pending', fromWork: true }), dueOn };
       };
       const gstr1 = ret('gstr1');
@@ -147,7 +159,7 @@ router.get(
         members: i?.members || [],
         gstr1,
         gstr3b,
-        done: cs ? (RETURN_RULES[type] ? [gstr1, gstr3b].every((r) => r.status === 'filed') : cs.status === 'completed') : false,
+        done: RETURN_RULES[type] ? [gstr1, gstr3b].every((r) => r.status === 'filed') : (cs ? cs.status === 'completed' : false),
       });
     }
 
@@ -223,6 +235,81 @@ router.put(
     if (req.body.notes !== undefined) filing.notes = req.body.notes;
     await filing.save();
     res.json({ message: 'Saved', data: await populate(GstFiling.findById(filing._id)) });
+  })
+);
+
+// Quick 1-click filing status toggle (GSTR-1 or GSTR-3B)
+router.post(
+  '/:id/mark-return',
+  can('gst_filing', 'manage'),
+  asyncHandler(async (req, res) => {
+    const { period, kind, status, filedOn } = req.body;
+    if (!period) throw new HttpError(400, 'Period is required');
+    if (!['gstr1', 'gstr3b'].includes(kind)) throw new HttpError(400, 'Invalid return kind (must be gstr1 or gstr3b)');
+    if (!['filed', 'pending'].includes(status)) throw new HttpError(400, 'Status must be filed or pending');
+
+    const filing = await GstFiling.findById(req.params.id);
+    if (!filing) throw new HttpError(404, 'Filing not found');
+
+    const day = status === 'filed' ? (isDayKey(filedOn) ? filedOn : todayKey()) : null;
+
+    filing.returnsLog = filing.returnsLog || [];
+    const idx = filing.returnsLog.findIndex((l) => l.period === period && l.kind === kind);
+    const entry = {
+      period,
+      kind,
+      status,
+      filedOn: day || undefined,
+      updatedBy: req.user._id,
+      updatedAt: new Date(),
+    };
+
+    if (idx >= 0) {
+      filing.returnsLog[idx] = entry;
+    } else {
+      filing.returnsLog.push(entry);
+    }
+    await filing.save();
+
+    // If there is linked CustomerService work for this period, also sync schedule steps and tasks
+    const cs = await CustomerService.findOne({
+      gstFiling: filing._id,
+      period,
+      status: { $ne: 'cancelled' },
+    });
+
+    if (cs) {
+      const items = await ScheduleItem.find({ customerService: cs._id, status: { $ne: 'Cancelled' } });
+      const matchingItems = items.filter((it) => returnOfStep(it.content) === kind);
+      for (const item of matchingItems) {
+        if (status === 'filed') {
+          item.status = 'Completed';
+          if (item.linkedTask) {
+            await Task.findByIdAndUpdate(item.linkedTask, {
+              status: 'Completed',
+              completedAt: new Date(),
+            });
+          }
+        } else {
+          item.status = 'Pending';
+          if (item.linkedTask) {
+            await Task.findByIdAndUpdate(item.linkedTask, {
+              status: 'Pending',
+              completedAt: null,
+            });
+          }
+        }
+        await item.save();
+      }
+      if (matchingItems.length > 0) {
+        await syncCustomerService(cs._id);
+      }
+    }
+
+    res.json({
+      message: `${kind.toUpperCase()} marked as ${status}`,
+      data: { period, kind, status, filedOn: day },
+    });
   })
 );
 

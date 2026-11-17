@@ -4,7 +4,7 @@ import mongoose from 'mongoose';
 // covered first, the rest is professional fee (feeds the Collection sheet).
 const salePaymentSchema = new mongoose.Schema(
   {
-    sale: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale', required: true },
+    sale: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale', required: false },
     customer: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true },
     amount: { type: Number, default: 0, min: 0 },
     discount: { type: Number, default: 0, min: 0 }, // waived in this entry
