@@ -20,6 +20,25 @@ const escapeRegex = (s = '') => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // Give every sale without an invoice its number (oldest first), and drop
 // invoices of deleted sales. Runs one at a time so numbers stay in order.
 let running = null;
+
+async function addToAutomaticInvoice(key, sales) {
+  const [first] = sales;
+  const filter = { invoiceGroupKey: key };
+  const addSales = { $addToSet: { groupedSales: { $each: sales.map((sale) => sale._id) } } };
+  if ((await Invoice.updateOne(filter, addSales)).matchedCount) return;
+  try {
+    await Invoice.create({
+      invoiceGroupKey: key,
+      sale: first._id,
+      invoiceDate: first.saleDate,
+      invoiceNo: await nextNumber('invoice', 'INV'),
+      groupedSales: sales.map((sale) => sale._id),
+    });
+  } catch (error) {
+    if (error.code !== 11000 || !(await Invoice.updateOne(filter, addSales)).matchedCount) throw error;
+  }
+}
+
 export function ensureInvoices() {
   running ||= (async () => {
     try {
@@ -27,15 +46,19 @@ export function ensureInvoices() {
       await Invoice.deleteMany({ sale: { $nin: saleIds }, groupedSales: { $nin: saleIds } });
       const [singleSales, groupedSales] = await Promise.all([Invoice.distinct('sale'), Invoice.distinct('groupedSales')]);
       const pending = await Sale.find({ _id: { $nin: [...singleSales, ...groupedSales] } })
-        .select('saleDate invoiceBatch').sort({ saleDate: 1, createdAt: 1, _id: 1 }).lean();
+        .select('saleDate invoiceBatch invoiceGroupKey').sort({ saleDate: 1, createdAt: 1, _id: 1 }).lean();
       const batches = new Map();
       for (const sale of pending) {
-        const key = String(sale.invoiceBatch || sale._id);
+        const key = sale.invoiceGroupKey || String(sale.invoiceBatch || sale._id);
         if (!batches.has(key)) batches.set(key, []);
         batches.get(key).push(sale);
       }
       for (const sales of batches.values()) {
         const [first] = sales;
+        if (first.invoiceGroupKey) {
+          await addToAutomaticInvoice(first.invoiceGroupKey, sales);
+          continue;
+        }
         try {
           await Invoice.create({
             sale: first._id,
@@ -158,6 +181,7 @@ router.get(
   '/:id',
   can('invoices', 'view'),
   asyncHandler(async (req, res) => {
+    await ensureInvoices();
     const requested = await Invoice.findById(req.params.id).select('sale');
     if (!requested) throw new HttpError(404, 'Invoice not found');
     const canonical = await invoiceForSale(requested.sale);

@@ -13,7 +13,7 @@ import { User } from '../models/User.js';
 import { Referral } from '../models/Referral.js';
 import { B2BPartner } from '../models/B2BPartner.js';
 import { nextNumber } from '../models/Counter.js';
-import { buildSale, recalcSale } from '../services/sales.js';
+import { buildSale, invoiceGroupFor, recalcSale } from '../services/sales.js';
 import { creditIncentive } from '../services/incentive.js';
 import { hasPermission } from '../middleware/auth.js';
 import { protect, can } from '../middleware/auth.js';
@@ -453,7 +453,7 @@ router.post(
 
     let sale = null;
     if (saleData) {
-      sale = new Sale({ ...saleData, customerService: assignment._id, saleNo: await nextNumber('sale', 'S'), createdBy: req.user._id });
+      sale = new Sale({ ...saleData, invoiceGroupKey: invoiceGroupFor(saleData), customerService: assignment._id, saleNo: await nextNumber('sale', 'S'), createdBy: req.user._id });
       await recalcSale(sale);
       if (incentive) await creditIncentive({ customer: customer._id, service: service._id, member: incentive.member, sale, amount: incentive.amount, by: req.user._id });
     }

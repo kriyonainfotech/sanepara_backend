@@ -6,6 +6,7 @@ const invoiceSchema = new mongoose.Schema(
     invoiceNo: { type: String, required: true, unique: true },
     sale: { type: mongoose.Schema.Types.ObjectId, ref: 'Sale', required: true, unique: true },
     groupedSales: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Sale' }], default: undefined },
+    invoiceGroupKey: { type: String, unique: true, sparse: true },
     invoiceDate: { type: String, required: true }, // 'YYYY-MM-DD'
     notes: { type: String, trim: true },
   },

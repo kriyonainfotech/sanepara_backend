@@ -9,7 +9,7 @@ import { B2BPartner } from '../models/B2BPartner.js';
 import { BankAccount } from '../models/BankAccount.js';
 import { nextNumber } from '../models/Counter.js';
 import { protect, can, hasPermission } from '../middleware/auth.js';
-import { buildSale, commissionOf, computeFees, recalcSale } from '../services/sales.js';
+import { buildSale, commissionOf, computeFees, invoiceGroupFor, recalcSale } from '../services/sales.js';
 import { monthBounds } from '../services/payroll.js';
 import { pickBank } from '../services/banks.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
@@ -179,7 +179,7 @@ async function createSaleBatch(body, userId) {
     const balance = money(data.totalAmount - amount);
     remaining = money(remaining - amount);
     const sale = new Sale({
-      ...data, invoiceBatch, saleNo: await nextNumber('sale', 'S'), createdBy: userId,
+      ...data, invoiceBatch, invoiceGroupKey: invoiceGroupFor(data), saleNo: await nextNumber('sale', 'S'), createdBy: userId,
       receivedAmount: amount, govtReceived: govtPart, balance, b2bCommission: commissionOf(data),
       status: balance === 0 ? 'Cleared' : amount > 0 ? 'Partial' : 'Pending',
     });
@@ -233,7 +233,7 @@ router.post(
     if (upfront < 0 || upfront > data.totalAmount) throw new HttpError(400, 'Received amount must be between 0 and the total');
     if (upfront > 0 && data.saleDate > todayKey()) throw new HttpError(400, 'A future-dated sale cannot have a payment yet');
 
-    const sale = new Sale({ ...data, saleNo: await nextNumber('sale', 'S'), createdBy: req.user._id });
+    const sale = new Sale({ ...data, invoiceGroupKey: invoiceGroupFor(data), saleNo: await nextNumber('sale', 'S'), createdBy: req.user._id });
     await recalcSale(sale);
     if (upfront > 0) {
       await SalePayment.create({
@@ -256,6 +256,9 @@ router.put(
       throw new HttpError(400, 'Customer cannot change once payments are recorded');
     const changes = await buildSale(req.body, sale);
     const billingChanged = String(changes.customer) !== String(sale.customer) || (changes.gstNumber || '') !== (sale.gstNumber || '');
+    if ((billingChanged || changes.saleDate !== sale.saleDate) && sale.invoiceGroupKey) {
+      throw new HttpError(400, 'Customer, GSTIN and sale date must stay the same on an automatically grouped invoice');
+    }
     if (billingChanged && (sale.invoiceBatch || await Invoice.exists({ groupedSales: sale._id }))) {
       throw new HttpError(400, 'Customer and GSTIN must stay the same on a combined invoice');
     }

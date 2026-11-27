@@ -11,6 +11,8 @@ import { firmOf } from '../utils/gst.js';
 
 const money = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
+export const invoiceGroupFor = ({ customer, gstNumber, saleDate }) => `${customer}:${gstNumber || ''}:${saleDate}`;
+
 export const computeFees = (professionalFee, govtFee) => {
   const p = money(professionalFee), g = money(govtFee);
   return { professionalFee: p, govtFee: g, totalAmount: money(p + g) };
