@@ -8,6 +8,7 @@ import { nextNumber } from '../models/Counter.js';
 import { getSetting } from '../models/Setting.js';
 import { protect, can } from '../middleware/auth.js';
 import { monthBounds } from '../services/payroll.js';
+import { invoiceGroupFor } from '../services/sales.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
 import { isDayKey, todayKey } from '../utils/dates.js';
 
@@ -21,12 +22,20 @@ const escapeRegex = (s = '') => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // invoices of deleted sales. Runs one at a time so numbers stay in order.
 let running = null;
 
-async function addToAutomaticInvoice(key, sales) {
+async function addToAutomaticInvoice(key, sales, existing) {
   const [first] = sales;
   const filter = { invoiceGroupKey: key };
   const addSales = { $addToSet: { groupedSales: { $each: sales.map((sale) => sale._id) } } };
   if ((await Invoice.updateOne(filter, addSales)).matchedCount) return;
   try {
+    if (existing) {
+      const updated = await Invoice.updateOne(
+        { _id: existing._id, invoiceGroupKey: { $exists: false }, groupedSales: { $exists: false } },
+        { $set: { invoiceGroupKey: key, groupedSales: sales.map((sale) => sale._id) } },
+      );
+      if (updated.matchedCount || (await Invoice.updateOne(filter, addSales)).matchedCount) return;
+      throw new HttpError(409, 'An invoice changed while grouping. Reload invoices to retry.');
+    }
     await Invoice.create({
       invoiceGroupKey: key,
       sale: first._id,
@@ -42,35 +51,49 @@ async function addToAutomaticInvoice(key, sales) {
 export function ensureInvoices() {
   running ||= (async () => {
     try {
-      const saleIds = await Sale.distinct('_id');
+      const sales = await Sale.find().select('customer gstNumber saleDate invoiceGroupKey')
+        .sort({ saleDate: 1, createdAt: 1, _id: 1 }).lean();
+      const saleIds = sales.map((sale) => sale._id);
       await Invoice.deleteMany({ sale: { $nin: saleIds }, groupedSales: { $nin: saleIds } });
-      const [singleSales, groupedSales] = await Promise.all([Invoice.distinct('sale'), Invoice.distinct('groupedSales')]);
-      const pending = await Sale.find({ _id: { $nin: [...singleSales, ...groupedSales] } })
-        .select('saleDate invoiceBatch invoiceGroupKey').sort({ saleDate: 1, createdAt: 1, _id: 1 }).lean();
+      const invoices = await Invoice.find().select('sale invoiceNo invoiceGroupKey groupedSales').lean();
+      const bySale = new Map();
+      for (const invoice of invoices) bySale.set(String(invoice.sale), invoice);
+      for (const invoice of invoices) {
+        for (const saleId of invoice.groupedSales || []) bySale.set(String(saleId), invoice);
+      }
       const batches = new Map();
-      for (const sale of pending) {
-        const key = sale.invoiceGroupKey || String(sale.invoiceBatch || sale._id);
+      for (const sale of sales) {
+        const invoice = bySale.get(String(sale._id));
+        if (invoice?.groupedSales?.length && !invoice.invoiceGroupKey) continue;
+        const key = invoice?.invoiceGroupKey || sale.invoiceGroupKey || invoiceGroupFor(sale);
         if (!batches.has(key)) batches.set(key, []);
         batches.get(key).push(sale);
       }
-      for (const sales of batches.values()) {
-        const [first] = sales;
-        if (first.invoiceGroupKey) {
-          await addToAutomaticInvoice(first.invoiceGroupKey, sales);
+      let created = 0;
+      for (const [key, batch] of batches) {
+        const [first] = batch;
+        const current = batch.map((sale) => bySale.get(String(sale._id)));
+        const automatic = current.find((invoice) => invoice?.invoiceGroupKey === key);
+        if (automatic && current.every((invoice) => invoice?._id.equals(automatic._id))) continue;
+        if (automatic || batch.length > 1 || first.invoiceGroupKey) {
+          const oldest = current.filter(Boolean).sort((a, b) => a.invoiceNo.localeCompare(b.invoiceNo, undefined, { numeric: true }))[0];
+          await addToAutomaticInvoice(key, batch, oldest);
+          if (!oldest) created++;
           continue;
         }
+        if (current[0]) continue;
         try {
           await Invoice.create({
             sale: first._id,
             invoiceDate: first.saleDate,
             invoiceNo: await nextNumber('invoice', 'INV'),
-            ...(sales.length > 1 && { groupedSales: sales.map((sale) => sale._id) }),
           });
+          created++;
         } catch (error) {
           if (error.code !== 11000 || !await Invoice.exists({ sale: first._id })) throw error;
         }
       }
-      return pending.length;
+      return created;
     } finally {
       running = null;
     }

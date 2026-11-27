@@ -256,7 +256,8 @@ router.put(
       throw new HttpError(400, 'Customer cannot change once payments are recorded');
     const changes = await buildSale(req.body, sale);
     const billingChanged = String(changes.customer) !== String(sale.customer) || (changes.gstNumber || '') !== (sale.gstNumber || '');
-    if ((billingChanged || changes.saleDate !== sale.saleDate) && sale.invoiceGroupKey) {
+    if ((billingChanged || changes.saleDate !== sale.saleDate) &&
+        (sale.invoiceGroupKey || await Invoice.exists({ groupedSales: sale._id, invoiceGroupKey: { $exists: true } }))) {
       throw new HttpError(400, 'Customer, GSTIN and sale date must stay the same on an automatically grouped invoice');
     }
     if (billingChanged && (sale.invoiceBatch || await Invoice.exists({ groupedSales: sale._id }))) {
