@@ -21,6 +21,7 @@ const userSchema = new mongoose.Schema(
     halfDayHours: { type: Number, default: 4, min: 0, max: 24 }, // worked ≥ this = Half Day, else Absent
     joiningDate: { type: Date },
     isActive: { type: Boolean, default: true },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', select: false },
     // Deleted members stay in the database so old tasks, attendance, sales and
     // salary records keep their name; they are hidden everywhere and cannot log in.
     deletedAt: { type: Date },

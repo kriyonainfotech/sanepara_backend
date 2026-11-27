@@ -19,6 +19,8 @@ const taskSchema = new mongoose.Schema(
     client: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer' },
     scheduleItem: { type: mongoose.Schema.Types.ObjectId, ref: 'ScheduleItem' },
     customerService: { type: mongoose.Schema.Types.ObjectId, ref: 'CustomerService' }, // service bunch
+    supportQuery: { type: mongoose.Schema.Types.ObjectId, ref: 'SupportQuery', unique: true, sparse: true },
+    supportService: { type: String, trim: true },
     order: { type: Number, default: 0 }, // position inside the bunch
     dailyRule: { type: mongoose.Schema.Types.ObjectId, ref: 'DailyTaskRule' },
 

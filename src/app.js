@@ -8,6 +8,7 @@ import dashboardRoutes from './routes/dashboard.js';
 import permissionRoutes from './routes/permissions.js';
 import scheduleRoutes from './routes/schedule.js';
 import taskRoutes from './routes/tasks.js';
+import supportQueryRoutes from './routes/supportQueries.js';
 import checklistTemplateRoutes from './routes/checklistTemplates.js';
 import dailyTaskRuleRoutes from './routes/dailyTaskRules.js';
 import attendanceRoutes from './routes/attendance.js';
@@ -38,7 +39,7 @@ function allowedOrigins(value) {
 export function createApp() {
   const app = express();
   app.use(cors({ origin: allowedOrigins(process.env.CLIENT_URL) }));
-  app.use(express.json({ limit: '5mb' })); // customer imports send up to 2000 rows
+  app.use(express.json({ limit: '5mb' })); // customer imports send up to 3,000 rows
   // Express 5 leaves req.body undefined when a request has no JSON body.
   app.use((req, _res, next) => {
     req.body ??= {};
@@ -61,6 +62,7 @@ export function createApp() {
   app.use('/api/permissions', permissionRoutes);
   app.use('/api/schedule', scheduleRoutes);
   app.use('/api/tasks', taskRoutes);
+  app.use('/api/support-queries', supportQueryRoutes);
   app.use('/api/checklist-templates', checklistTemplateRoutes);
   app.use('/api/daily-task-rules', dailyTaskRuleRoutes);
   app.use('/api/attendance', attendanceRoutes);

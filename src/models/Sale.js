@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 const saleSchema = new mongoose.Schema(
   {
     saleNo: { type: String, unique: true },
+    invoiceBatch: { type: mongoose.Schema.Types.ObjectId },
     customer: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true },
     customerService: { type: mongoose.Schema.Types.ObjectId, ref: 'CustomerService' }, // the assigned service billed
     service: { type: mongoose.Schema.Types.ObjectId, ref: 'Service' },

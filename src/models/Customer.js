@@ -16,7 +16,7 @@ const customerSchema = new mongoose.Schema(
   {
     businessName: { type: String, required: true, trim: true },
     contactPerson: { type: String, trim: true },
-    phone: { type: String, required: true, trim: true, match: [/^\d{10}$/, 'Mobile number must be exactly 10 digits'] },
+    phone: { type: String, trim: true, match: [/^\d{10}$/, 'Mobile number must be exactly 10 digits'] },
     email: { type: String, trim: true, lowercase: true },
     gsts: [gstSchema],
     // First of `gsts`, kept in sync for screens that show a single GST number (invoices, tasks…).

@@ -5,6 +5,7 @@ import { User } from '../models/User.js';
 import { Customer } from '../models/Customer.js';
 import { ScheduleItem } from '../models/ScheduleItem.js';
 import { ChecklistTemplate } from '../models/ChecklistTemplate.js';
+import { SupportQuery } from '../models/SupportQuery.js';
 import { protect, can, hasPermission } from '../middleware/auth.js';
 import { syncItemFromTask, revertItemForTask } from '../services/scheduleSync.js';
 import { isDoneStatus, STATUSES } from '../services/taskStatus.js';
@@ -17,6 +18,10 @@ router.use(protect);
 const deny = () => new HttpError(403, 'You do not have access to this');
 const escapeRegex = (s = '') => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const isOwn = (req, task) => String(task.assignedTo?._id || task.assignedTo) === String(req.user._id);
+const visibleTasks = (req) => ({
+  $or: [{ supportQuery: null }, { assignedTo: req.user._id }, { createdBy: req.user._id }],
+});
+const findVisibleTask = (req) => Task.findOne({ _id: req.params.id, ...visibleTasks(req) });
 
 const populate = (q) =>
   q
@@ -94,7 +99,7 @@ router.get(
     const today = todayKey();
     const startDate = isDayKey(req.query.startDate) ? req.query.startDate : today;
     const endDate = isDayKey(req.query.endDate) ? req.query.endDate : startDate;
-    const listQuery = { ...query, dueDate: { $gte: startDate, $lte: endDate } };
+    const listQuery = { $and: [query, visibleTasks(req)], dueDate: { $gte: startDate, $lte: endDate } };
     const limit = Math.min(500, parseInt(req.query.limit) || 500);
 
     const [tasks, total] = await Promise.all([
@@ -111,7 +116,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const query = await buildQuery(req.query);
     const [from, to] = monthRange(isDayKey(req.query.month) ? req.query.month : todayKey());
-    res.json({ data: await calendarFor(query, from, to) });
+    res.json({ data: await calendarFor({ $and: [query, visibleTasks(req)] }, from, to) });
   })
 );
 
@@ -127,10 +132,13 @@ router.get(
 router.get(
   '/:id',
   asyncHandler(async (req, res) => {
-    const task = await populate(Task.findById(req.params.id)).populate('statusHistory.updatedBy', 'name').populate('pendingReasons.updatedBy', 'name');
+    const task = await populate(findVisibleTask(req)).populate('statusHistory.updatedBy', 'name').populate('pendingReasons.updatedBy', 'name');
     if (!task) throw new HttpError(404, 'Task not found');
     if (!isOwn(req, task) && !hasPermission(req, 'tasks', 'view')) throw deny();
-    res.json({ data: task });
+    const supportDetails = task.supportQuery
+      ? await SupportQuery.findById(task.supportQuery).select('category answers').lean()
+      : undefined;
+    res.json({ data: { ...task.toObject(), supportDetails } });
   })
 );
 
@@ -202,12 +210,13 @@ router.post(
 
 // Tasks linked to a schedule item can also be managed by Schedule → Manage.
 const canManageTask = (req, task, action) =>
-  hasPermission(req, 'tasks', action) || (task.scheduleItem && hasPermission(req, 'schedule', 'manage'));
+  task.supportQuery ? String(task.createdBy) === String(req.user._id)
+    : hasPermission(req, 'tasks', action) || (task.scheduleItem && hasPermission(req, 'schedule', 'manage'));
 
 router.put(
   '/:id',
   asyncHandler(async (req, res) => {
-    const task = await Task.findById(req.params.id);
+    const task = await findVisibleTask(req);
     if (!task) throw new HttpError(404, 'Task not found');
     if (!canManageTask(req, task, 'edit')) throw deny();
 
@@ -224,6 +233,9 @@ router.put(
       task.completedAt = new Date();
     }
 
+    if (data.status && data.status !== task.status) {
+      task.statusHistory.push({ status: data.status, updatedBy: req.user._id });
+    }
     Object.assign(task, data);
 
     if ('checklistTemplateId' in req.body && String(req.body.checklistTemplateId || '') !== String(task.checklistTemplate || '')) {
@@ -244,7 +256,7 @@ router.patch(
   '/:id/status',
   asyncHandler(async (req, res) => {
     const { status, note } = req.body;
-    const task = await Task.findById(req.params.id);
+    const task = await findVisibleTask(req);
     if (!task) throw new HttpError(404, 'Task not found');
     if (!isOwn(req, task) && !canManageTask(req, task, 'edit')) throw deny();
     if (!STATUSES.includes(status)) throw new HttpError(400, 'Unknown status');
@@ -266,7 +278,7 @@ router.patch(
 router.put(
   '/:id/checklist/:index',
   asyncHandler(async (req, res) => {
-    const task = await Task.findById(req.params.id);
+    const task = await findVisibleTask(req);
     if (!task) throw new HttpError(404, 'Task not found');
     if (!isOwn(req, task) && !canManageTask(req, task, 'edit')) throw deny();
     const i = parseInt(req.params.index);
@@ -282,7 +294,7 @@ router.put(
 router.delete(
   '/:id',
   asyncHandler(async (req, res) => {
-    const task = await Task.findById(req.params.id);
+    const task = await findVisibleTask(req);
     if (!task) throw new HttpError(404, 'Task not found');
     if (!canManageTask(req, task, 'delete')) throw deny();
     await task.deleteOne();
@@ -297,8 +309,9 @@ router.post(
   asyncHandler(async (req, res) => {
     const ids = (req.body.taskIds || []).filter((id) => mongoose.isValidObjectId(id));
     if (!ids.length) throw new HttpError(400, 'No tasks selected');
-    const tasks = await Task.find({ _id: { $in: ids } });
-    await Task.deleteMany({ _id: { $in: ids } });
+    const filter = { _id: { $in: ids }, $or: [{ supportQuery: null }, { createdBy: req.user._id }] };
+    const tasks = await Task.find(filter);
+    await Task.deleteMany(filter);
     for (const t of tasks) await revertItemForTask(t);
     res.json({ message: `${tasks.length} tasks deleted`, deletedCount: tasks.length });
   })
@@ -316,7 +329,8 @@ router.put(
     if (dueDate && (!isDayKey(dueDate) || dueDate < todayKey())) throw new HttpError(400, 'Pick a date from today onwards');
     if (!status && !dueDate) throw new HttpError(400, 'Nothing to update');
 
-    const tasks = await Task.find({ _id: { $in: ids } });
+    const scope = dueDate ? { $or: [{ supportQuery: null }, { createdBy: req.user._id }] } : visibleTasks(req);
+    const tasks = await Task.find({ _id: { $in: ids }, ...scope });
     let skipped = 0;
     for (const t of tasks) {
       if (status) {

@@ -1,3 +1,8 @@
+import mongoose from 'mongoose';
+import { Task } from '../models/Task.js';
+import { User } from '../models/User.js';
+import { HttpError } from '../utils/asyncHandler.js';
+import { isDayKey, todayKey } from '../utils/dates.js';
 import { ScheduleItem } from '../models/ScheduleItem.js';
 import { CustomerService } from '../models/CustomerService.js';
 import { isDoneStatus } from './taskStatus.js';
@@ -116,4 +121,48 @@ export async function syncServiceTasks(oldTasks, service, userId) {
     }
     if (added.length || removed.length || renamed.length) await syncCustomerService(cs._id);
   }
+}
+
+export async function validateSchedule(body) {
+  const { assignedTo, dueDate } = body;
+  if (!mongoose.isValidObjectId(assignedTo) || !(await User.exists({ _id: assignedTo, isActive: true })))
+    throw new HttpError(400, 'Select an active team member');
+  if (!isDayKey(dueDate)) throw new HttpError(400, 'Please pick a date');
+  if (dueDate < todayKey()) throw new HttpError(400, 'Date cannot be in the past');
+  const taskTime = /^\d{2}:\d{2}$/.test(body.taskTime || '') ? body.taskTime : undefined;
+  return { assignedTo, dueDate, taskTime };
+}
+
+const categoryFor = (name = '') => {
+  const s = name.toLowerCase();
+  if (s.includes('gst')) return 'GST';
+  if (s.includes('itr') || s.includes('income tax')) return 'ITR';
+  if (s.includes('trademark')) return 'Trademark';
+  return 'General';
+};
+
+export async function scheduleServiceTasks(cs, serviceName, { assignedTo, dueDate, taskTime }, createdBy) {
+  const items = await ScheduleItem.find({ customerService: cs._id, status: 'Unscheduled' }).sort({ order: 1 });
+  if (!items.length) throw new HttpError(400, 'Everything in this service is already scheduled');
+
+  const category = categoryFor(serviceName);
+  const tasks = await Task.insertMany(
+    items.map((i) => ({
+      title: i.content,
+      description: i.description,
+      type: 'Team',
+      status: 'Pending',
+      dueDate,
+      taskTime,
+      taskCategory: category,
+      assignedTo,
+      createdBy,
+      client: cs.customer,
+      scheduleItem: i._id,
+      customerService: cs._id,
+      order: i.order,
+    }))
+  );
+  for (const t of tasks) await syncItemFromTask(t);
+  return tasks;
 }

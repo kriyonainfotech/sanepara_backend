@@ -21,6 +21,11 @@ const customerServiceSchema = new mongoose.Schema(
     // Firm (one of the customer's GST registrations) the work is for; '' = the customer itself.
     gstNumber: { type: String, default: '' },
     firmName: { type: String, default: '' },
+    remarks: [{
+      note: { type: String, required: true, trim: true, maxlength: 1000 },
+      author: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+      date: { type: Date, default: Date.now },
+    }],
   },
   { timestamps: true }
 );

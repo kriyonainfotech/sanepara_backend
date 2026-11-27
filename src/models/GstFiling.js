@@ -29,6 +29,7 @@ const gstFilingSchema = new mongoose.Schema(
         kind: { type: String, enum: ['gstr1', 'gstr3b'], required: true },
         status: { type: String, enum: ['filed', 'pending'], default: 'filed' },
         filedOn: { type: String },
+        arn: { type: String, match: /^[A-Z0-9]{15}$/ },
         updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
         updatedAt: { type: Date, default: Date.now },
       },

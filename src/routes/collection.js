@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { SalePayment } from '../models/SalePayment.js';
 import { Sale } from '../models/Sale.js';
-import { Expense } from '../models/Expense.js';
+import { expenseTotals } from '../services/expenses.js';
 import { getSetting, setSetting } from '../models/Setting.js';
 import { protect, can } from '../middleware/auth.js';
 import { eachDay, monthBounds } from '../services/payroll.js';
@@ -36,7 +36,7 @@ router.get(
         { $match: { date: { $gte: from, $lte: to } } },
         { $group: { _id: '$date', collection: { $sum: '$amount' }, govt: { $sum: '$govtPart' }, net: { $sum: '$professionalPart' }, count: { $sum: 1 } } },
       ]),
-      Expense.aggregate([{ $match: { date: { $gte: from, $lte: to } } }, { $group: { _id: '$date', expense: { $sum: '$amount' }, count: { $sum: 1 } } }]),
+      expenseTotals({ $gte: from, $lte: to }, '$date', 'expense'),
       Sale.aggregate([{ $match: { saleDate: { $gte: from, $lte: to } } }, { $group: { _id: null, total: { $sum: '$totalAmount' }, professional: { $sum: '$professionalFee' }, count: { $sum: 1 } } }]),
     ]);
     const payBy = Object.fromEntries(payments.map((p) => [p._id, p]));

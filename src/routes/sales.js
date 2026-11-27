@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import mongoose from 'mongoose';
 import { Sale } from '../models/Sale.js';
+import { Invoice } from '../models/Invoice.js';
 import { SalePayment } from '../models/SalePayment.js';
 import { Customer } from '../models/Customer.js';
 import { Service } from '../models/Service.js';
@@ -8,7 +9,7 @@ import { B2BPartner } from '../models/B2BPartner.js';
 import { BankAccount } from '../models/BankAccount.js';
 import { nextNumber } from '../models/Counter.js';
 import { protect, can, hasPermission } from '../middleware/auth.js';
-import { buildSale, computeFees, recalcSale } from '../services/sales.js';
+import { buildSale, commissionOf, computeFees, recalcSale } from '../services/sales.js';
 import { monthBounds } from '../services/payroll.js';
 import { pickBank } from '../services/banks.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
@@ -47,6 +48,7 @@ router.get(
     if (['Pending', 'Partial', 'Cleared', 'Written Off'].includes(req.query.status)) filter.status = req.query.status;
     if (req.query.status === 'open') filter.balance = { $gt: 0 };
     for (const k of ['customer', 'b2bPartner', 'soldBy', 'service']) if (mongoose.isValidObjectId(req.query[k])) filter[k] = req.query[k];
+    if (req.query.channel === 'b2c') filter.b2bPartner = null;
     if (req.query.search?.trim()) {
       const rx = { $regex: escapeRegex(req.query.search.trim()), $options: 'i' };
       const customers = await Customer.find({ $or: [{ businessName: rx }, { phone: rx }] }).distinct('_id');
@@ -75,12 +77,20 @@ router.get(
 router.get(
   '/outstanding',
   can('sales', 'view'),
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
+    const channel = req.query.channel;
+    if (channel !== undefined && channel !== 'b2b' && channel !== 'b2c') {
+      throw new HttpError(400, 'Invalid outstanding channel');
+    }
+    const filter = { balance: { $gt: 0 } };
+    if (channel === 'b2b') filter.b2bPartner = { $ne: null };
+    if (channel === 'b2c') filter.b2bPartner = null;
+    const byPartner = channel === 'b2b';
     const rows = await Sale.aggregate([
-      { $match: { balance: { $gt: 0 } } },
+      { $match: filter },
       {
         $group: {
-          _id: '$customer',
+          _id: byPartner ? '$b2bPartner' : '$customer',
           balance: { $sum: '$balance' },
           total: { $sum: '$totalAmount' },
           received: { $sum: '$receivedAmount' },
@@ -89,11 +99,17 @@ router.get(
         },
       },
       { $sort: { balance: -1 } },
-      { $lookup: { from: 'customers', localField: '_id', foreignField: '_id', as: 'customer' } },
-      { $unwind: '$customer' },
-      { $project: { balance: 1, total: 1, received: 1, sales: 1, oldest: 1, 'customer._id': 1, 'customer.businessName': 1, 'customer.phone': 1, 'customer.contactPerson': 1 } },
+      ...(byPartner ? [
+        { $lookup: { from: B2BPartner.collection.name, localField: '_id', foreignField: '_id', as: 'partner' } },
+        { $unwind: { path: '$partner', preserveNullAndEmptyArrays: true } },
+        { $project: { balance: 1, total: 1, received: 1, sales: 1, oldest: 1, 'partner.name': 1, 'partner.firmName': 1, 'partner.phone': 1 } },
+      ] : [
+        { $lookup: { from: Customer.collection.name, localField: '_id', foreignField: '_id', as: 'customer' } },
+        { $unwind: '$customer' },
+        { $project: { balance: 1, total: 1, received: 1, sales: 1, oldest: 1, 'customer._id': 1, 'customer.businessName': 1, 'customer.phone': 1, 'customer.contactPerson': 1 } },
+      ]),
     ]);
-    res.json({ data: rows, total: Math.round(rows.reduce((a, r) => a + r.balance, 0) * 100) / 100 });
+    res.json({ channel, data: rows, total: Math.round(rows.reduce((a, r) => a + r.balance, 0) * 100) / 100 });
   })
 );
 
@@ -132,6 +148,81 @@ router.get(
 
 // ---------- create / edit / delete ----------
 
+async function createSaleBatch(body, userId) {
+  const { additionalItems } = body;
+  if (!Array.isArray(additionalItems) || additionalItems.length < 1 || additionalItems.length > 99 ||
+      additionalItems.some((item) => !item || typeof item.title !== 'string')) {
+    throw new HttpError(400, 'Enter between 2 and 100 service items');
+  }
+  const shared = { soldBy: String(userId), ...body };
+  const itemData = await Promise.all([
+    buildSale(shared),
+    ...additionalItems.map(({ title, service, customerService, professionalFee, govtFee }) =>
+      buildSale({ ...shared, title, service, customerService: customerService || '', professionalFee, govtFee, referralAmount: 0 })),
+  ]);
+  if (itemData.some((item) => item.gstNumber !== itemData[0].gstNumber)) {
+    throw new HttpError(400, 'Choose services billed to the same GSTIN');
+  }
+  const money = (value) => Math.round(value * 100) / 100;
+  const total = money(itemData.reduce((sum, item) => sum + item.totalAmount, 0));
+  let remaining = money(Number(body.receivedNow) || 0);
+  if (remaining < 0 || remaining > total) throw new HttpError(400, 'Received amount must be between 0 and the total');
+  if (remaining > 0 && itemData[0].saleDate > todayKey()) throw new HttpError(400, 'A future-dated sale cannot have a payment yet');
+  const bank = remaining > 0 ? await pickBank(body.receivedBank) : undefined;
+  const receipt = remaining > 0 ? await nextNumber('receipt', 'R') : undefined;
+  const invoiceBatch = new mongoose.Types.ObjectId();
+  const sales = [];
+  const payments = [];
+  for (const data of itemData) {
+    const amount = Math.min(data.totalAmount, remaining);
+    const govtPart = Math.min(data.govtFee, amount);
+    const balance = money(data.totalAmount - amount);
+    remaining = money(remaining - amount);
+    const sale = new Sale({
+      ...data, invoiceBatch, saleNo: await nextNumber('sale', 'S'), createdBy: userId,
+      receivedAmount: amount, govtReceived: govtPart, balance, b2bCommission: commissionOf(data),
+      status: balance === 0 ? 'Cleared' : amount > 0 ? 'Partial' : 'Pending',
+    });
+    sales.push(sale);
+    if (amount > 0) payments.push({
+      sale: sale._id, customer: sale.customer, amount, govtPart, professionalPart: money(amount - govtPart),
+      date: sale.saleDate, mode: MODES.includes(body.receivedMode) ? body.receivedMode : 'Cash',
+      bank, receivedBy: userId, receipt,
+    });
+  }
+  await Promise.all(sales.map((sale) => sale.validate()));
+  const write = async (session) => {
+    const options = session ? { session } : {};
+    if (payments.length) await SalePayment.insertMany(payments, options);
+    await Sale.insertMany(sales.map((sale) => sale.toObject()), options);
+  };
+  try {
+    await mongoose.connection.transaction(write);
+  } catch (error) {
+    if (error.code !== 20 || !error.message.includes('Transaction numbers')) throw error;
+    try {
+      await write();
+    } catch (writeError) {
+      const saleIds = sales.map((sale) => sale._id);
+      await Promise.all([
+        Sale.deleteMany({ _id: { $in: saleIds } }),
+        SalePayment.deleteMany({ sale: { $in: saleIds } }),
+      ]);
+      throw writeError;
+    }
+  }
+  return sales;
+}
+
+router.post(
+  '/batch',
+  can('sales', 'create'),
+  asyncHandler(async (req, res) => {
+    const sales = await createSaleBatch(req.body, req.user._id);
+    res.status(201).json({ message: `${sales.length} services saved for one invoice`, data: sales[0] });
+  })
+);
+
 router.post(
   '/',
   can('sales', 'create'),
@@ -163,7 +254,12 @@ router.put(
     if (!sale) throw new HttpError(404, 'Sale not found');
     if (req.body.customer && String(req.body.customer) !== String(sale.customer) && (await SalePayment.exists({ sale: sale._id })))
       throw new HttpError(400, 'Customer cannot change once payments are recorded');
-    Object.assign(sale, await buildSale(req.body, sale));
+    const changes = await buildSale(req.body, sale);
+    const billingChanged = String(changes.customer) !== String(sale.customer) || (changes.gstNumber || '') !== (sale.gstNumber || '');
+    if (billingChanged && (sale.invoiceBatch || await Invoice.exists({ groupedSales: sale._id }))) {
+      throw new HttpError(400, 'Customer and GSTIN must stay the same on a combined invoice');
+    }
+    Object.assign(sale, changes);
     await recalcSale(sale);
     res.json({ message: 'Sale updated', data: await populate(Sale.findById(sale._id)) });
   })

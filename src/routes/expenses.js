@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { Expense } from '../models/Expense.js';
+import { B2BPayout } from '../models/B2BPayout.js';
+import { B2B_COMMISSION_ACCOUNT, expenseTotals } from '../services/expenses.js';
 import { SalePayment } from '../models/SalePayment.js';
 import { getSetting } from '../models/Setting.js';
 import { protect, can } from '../middleware/auth.js';
@@ -42,7 +44,7 @@ const clean = async (b) => {
 async function dayStatus(date) {
   const [limit, [agg]] = await Promise.all([
     expenseLimitOn(date),
-    Expense.aggregate([{ $match: { date } }, { $group: { _id: null, spent: { $sum: '$amount' } } }]),
+    expenseTotals(date, null, 'spent'),
   ]);
   const spent = r2(agg?.spent);
   return { date, limit, spent, remaining: r2(limit - spent) };
@@ -53,7 +55,7 @@ async function monthSummary(from, to) {
   const byMonth = { $substrBytes: ['$date', 0, 7] };
   const [{ heads }, spent, net] = await Promise.all([
     getSetting('collection'),
-    Expense.aggregate([{ $match: { date: { $gte: from, $lte: to } } }, { $group: { _id: byMonth, spent: { $sum: '$amount' }, count: { $sum: 1 } } }]),
+    expenseTotals({ $gte: from, $lte: to }, byMonth, 'spent'),
     SalePayment.aggregate([{ $match: { date: { $gte: from, $lte: to } } }, { $group: { _id: byMonth, net: { $sum: '$professionalPart' } } }]),
   ]);
   const months = {};
@@ -76,17 +78,25 @@ router.get(
     const [from, to] = range(req.query);
     const filter = { date: { $gte: from, $lte: to } };
     if (req.query.account) filter.account = req.query.account;
-    const [data, accounts, today, monthRows] = await Promise.all([
-      Expense.find(filter).populate('createdBy', 'name').populate('bank', 'name kind').sort({ date: -1, createdAt: -1 }),
+    const [expenses, payouts, accounts, today, monthRows] = await Promise.all([
+      Expense.find(filter).populate('createdBy', 'name').populate('bank', 'name kind').lean(),
+      !req.query.account || req.query.account === B2B_COMMISSION_ACCOUNT
+        ? B2BPayout.find({ paidOn: filter.date }).populate('partner', 'name').populate('paidBy', 'name').populate('bank', 'name kind').lean()
+        : [],
       knownAccounts(),
       dayStatus(todayKey()),
       monthSummary(from, to),
     ]);
+    const data = [...expenses, ...payouts.map((payout) => ({
+      _id: payout._id, source: 'b2b', date: payout.paidOn, amount: payout.amount, account: B2B_COMMISSION_ACCOUNT,
+      paidTo: payout.partner?.name, createdBy: payout.paidBy, createdAt: payout.createdAt,
+      bank: payout.bank, mode: payout.mode, note: payout.note,
+    }))].sort((a, b) => b.date.localeCompare(a.date) || new Date(b.createdAt) - new Date(a.createdAt));
     const byAccount = {};
     for (const e of data) byAccount[e.account] = r2((byAccount[e.account] || 0) + e.amount);
     res.json({
       from, to, data,
-      accounts,
+      accounts: [...new Set([...accounts, B2B_COMMISSION_ACCOUNT])],
       today,
       // Limit / spent for the whole selected period (not narrowed by account).
       period: monthRows.reduce((a, m) => ({ count: a.count + m.count, spent: r2(a.spent + m.spent), limit: r2(a.limit + m.limit), remaining: r2(a.remaining + m.remaining) }), { count: 0, spent: 0, limit: 0, remaining: 0 }),

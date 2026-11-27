@@ -5,7 +5,7 @@ import { GstFiling } from '../models/GstFiling.js';
 import { Service } from '../models/Service.js';
 import { Task } from '../models/Task.js';
 import { ScheduleItem } from '../models/ScheduleItem.js';
-import { createItemsForAssignment } from '../services/scheduleSync.js';
+import { createItemsForAssignment, scheduleServiceTasks, validateSchedule } from '../services/scheduleSync.js';
 import mongoose from 'mongoose';
 import { Sale } from '../models/Sale.js';
 import { SalePayment } from '../models/SalePayment.js';
@@ -100,6 +100,7 @@ router.get(
     if (!customer) throw new HttpError(404, 'Customer not found');
     const services = await CustomerService.find({ customer: customer._id })
       .populate('service', 'name tasks price')
+      .populate('remarks.author', 'name')
       .sort({ createdAt: -1 })
       .lean();
     const counts = await ScheduleItem.aggregate([
@@ -199,6 +200,16 @@ router.post(
   can('customers', 'create'),
   asyncHandler(async (req, res) => {
     const fields = pick(req.body);
+    const quickAdd = req.body.quickAdd === true && hasPermission(req, 'sales', 'create');
+    if (!quickAdd) {
+      if (typeof fields.contactPerson !== 'string' || !fields.contactPerson.trim()) {
+        throw new HttpError(400, 'Contact person is required');
+      }
+      if (!String(fields.businessName ?? '').trim()) fields.businessName = fields.contactPerson.trim();
+    }
+    if (!String(fields.phone ?? '').trim()) {
+      throw new HttpError(400, 'Mobile number is required');
+    }
     await checkGstsFree(fields.gsts);
     const customer = await Customer.create({ ...fields, addedBy: req.user._id });
     await customer.populate([{ path: 'addedBy', select: 'name' }, { path: 'referredByPartner', select: 'name firmName' }]);
@@ -225,7 +236,7 @@ router.post(
   asyncHandler(async (req, res) => {
     const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
     if (!rows.length) throw new HttpError(400, 'The file has no customer rows');
-    if (rows.length > 2000) throw new HttpError(400, 'Import at most 2000 customers at a time');
+    if (rows.length > 3000) throw new HttpError(400, 'Import at most 3,000 customers at a time');
     const canStartGst = hasPermission(req, 'gst_filing', 'manage');
 
     const existing = await Customer.find().select('businessName phone gsts.gstNumber').lean();
@@ -350,7 +361,23 @@ router.delete(
 
 // Assign a service — each of its tasks lands in Schedule Management as Unscheduled.
 router.post(
-  '/:id/services',
+  '/:id/services/:assignmentId/remarks',
+  can('customers', 'view'),
+  asyncHandler(async (req, res) => {
+    const note = typeof req.body.note === 'string' ? req.body.note.trim() : '';
+    if (!note || note.length > 1000) throw new HttpError(400, 'Enter a remark of up to 1000 characters');
+    const assignment = await CustomerService.findOneAndUpdate(
+      { _id: req.params.assignmentId, customer: req.params.id },
+      { $push: { remarks: { note, author: req.user._id, date: new Date() } } },
+      { new: true, runValidators: true }
+    ).select('remarks').populate('remarks.author', 'name');
+    if (!assignment) throw new HttpError(404, 'Assigned service not found');
+    res.status(201).json({ remarks: assignment.remarks });
+  })
+);
+
+router.post(
+  ['/:id/services', '/:id/services/assign-and-schedule'],
   can('services', 'assign'),
   asyncHandler(async (req, res) => {
     const [customer, service] = await Promise.all([
@@ -360,6 +387,15 @@ router.post(
     if (!customer) throw new HttpError(404, 'Customer not found');
     if (!service || !service.isActive) throw new HttpError(400, 'Select a valid service');
     const firm = firmOf(customer, req.body.gstNumber); // which of the customer's firms the work is for
+    let schedule = null;
+    if (req.path.endsWith('/assign-and-schedule')) {
+      if (!service.tasks.length) throw new HttpError(400, 'This service has no tasks to schedule');
+      const options = req.body.schedule || {};
+      if (!hasPermission(req, 'schedule', 'manage') && String(options.assignedTo) !== String(req.user._id)) {
+        throw new HttpError(403, 'You can only schedule this service for yourself');
+      }
+      schedule = await validateSchedule(options);
+    }
 
     // Optional sale created with the assignment: fees, sold by, B2B partner, referral person, incentive.
     const s = req.body.sale;
@@ -398,7 +434,21 @@ router.post(
       gstNumber: firm.gstNumber,
       firmName: firm.firmName,
     });
-    await createItemsForAssignment(assignment, service, req.user._id);
+    let scheduledCount = 0;
+    try {
+      await createItemsForAssignment(assignment, service, req.user._id);
+      if (schedule) {
+        scheduledCount = (await scheduleServiceTasks(assignment, service.name, schedule, req.user._id)).length;
+        assignment.status = 'in_progress';
+      }
+    } catch (error) {
+      await Promise.all([
+        Task.deleteMany({ customerService: assignment._id }),
+        ScheduleItem.deleteMany({ customerService: assignment._id }),
+      ]);
+      await assignment.deleteOne();
+      throw error;
+    }
     await assignment.populate('service', 'name tasks');
 
     let sale = null;
@@ -407,7 +457,7 @@ router.post(
       await recalcSale(sale);
       if (incentive) await creditIncentive({ customer: customer._id, service: service._id, member: incentive.member, sale, amount: incentive.amount, by: req.user._id });
     }
-    res.status(201).json({ assignment, sale });
+    res.status(201).json({ assignment, sale, scheduledCount });
   })
 );
 

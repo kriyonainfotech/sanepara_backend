@@ -3,12 +3,10 @@ import mongoose from 'mongoose';
 import { ScheduleItem } from '../models/ScheduleItem.js';
 import { CustomerService } from '../models/CustomerService.js';
 import { Task } from '../models/Task.js';
-import { User } from '../models/User.js';
 import { protect, can } from '../middleware/auth.js';
-import { syncCustomerService, syncItemFromTask, revertItemForTask } from '../services/scheduleSync.js';
+import { syncCustomerService, syncItemFromTask, revertItemForTask, validateSchedule, scheduleServiceTasks } from '../services/scheduleSync.js';
 import { isDoneStatus } from '../services/taskStatus.js';
 import { asyncHandler, HttpError } from '../utils/asyncHandler.js';
-import { isDayKey, todayKey } from '../utils/dates.js';
 
 const router = Router();
 router.use(protect);
@@ -116,24 +114,6 @@ router.get(
   })
 );
 
-async function validateSchedule(body) {
-  const { assignedTo, dueDate } = body;
-  if (!mongoose.isValidObjectId(assignedTo) || !(await User.exists({ _id: assignedTo, isActive: true })))
-    throw new HttpError(400, 'Select an active team member');
-  if (!isDayKey(dueDate)) throw new HttpError(400, 'Please pick a date');
-  if (dueDate < todayKey()) throw new HttpError(400, 'Date cannot be in the past');
-  const taskTime = /^\d{2}:\d{2}$/.test(body.taskTime || '') ? body.taskTime : undefined;
-  return { assignedTo, dueDate, taskTime };
-}
-
-const categoryFor = (name = '') => {
-  const s = name.toLowerCase();
-  if (s.includes('gst')) return 'GST';
-  if (s.includes('itr') || s.includes('income tax')) return 'ITR';
-  if (s.includes('trademark')) return 'Trademark';
-  return 'General';
-};
-
 // Schedule a whole service: every unscheduled item becomes a task for one member on one day.
 router.post(
   '/bunch/:id',
@@ -141,29 +121,8 @@ router.post(
   asyncHandler(async (req, res) => {
     const cs = await CustomerService.findById(req.params.id).populate('service', 'name');
     if (!cs) throw new HttpError(404, 'Service not found');
-    const { assignedTo, dueDate, taskTime } = await validateSchedule(req.body);
-    const items = await ScheduleItem.find({ customerService: cs._id, status: 'Unscheduled' }).sort({ order: 1 });
-    if (!items.length) throw new HttpError(400, 'Everything in this service is already scheduled');
-
-    const category = categoryFor(cs.service?.name);
-    const tasks = await Task.insertMany(
-      items.map((i) => ({
-        title: i.content,
-        description: i.description,
-        type: 'Team',
-        status: 'Pending',
-        dueDate,
-        taskTime,
-        taskCategory: category,
-        assignedTo,
-        createdBy: req.user._id,
-        client: cs.customer,
-        scheduleItem: i._id,
-        customerService: cs._id,
-        order: i.order,
-      }))
-    );
-    for (const t of tasks) await syncItemFromTask(t);
+    const schedule = await validateSchedule(req.body);
+    const tasks = await scheduleServiceTasks(cs, cs.service?.name, schedule, req.user._id);
     res.status(201).json({ message: `${tasks.length} tasks scheduled`, count: tasks.length });
   })
 );

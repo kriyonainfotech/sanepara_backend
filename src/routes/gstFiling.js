@@ -137,6 +137,7 @@ router.get(
           return {
             status: log.status,
             filedOn: log.status === 'filed' ? log.filedOn : null,
+            arn: log.status === 'filed' ? log.arn : undefined,
             dueOn,
             manual: true,
           };
@@ -238,15 +239,17 @@ router.put(
   })
 );
 
-// Quick 1-click filing status toggle (GSTR-1 or GSTR-3B)
+// Record a return acknowledgement or reopen a return.
 router.post(
-  '/:id/mark-return',
+  ['/:id/mark-return', '/:id/return-arn'],
   can('gst_filing', 'manage'),
   asyncHandler(async (req, res) => {
     const { period, kind, status, filedOn } = req.body;
+    const arn = typeof req.body.arn === 'string' ? req.body.arn.trim().toUpperCase() : '';
     if (!period) throw new HttpError(400, 'Period is required');
     if (!['gstr1', 'gstr3b'].includes(kind)) throw new HttpError(400, 'Invalid return kind (must be gstr1 or gstr3b)');
     if (!['filed', 'pending'].includes(status)) throw new HttpError(400, 'Status must be filed or pending');
+    if (status === 'filed' && !/^[A-Z0-9]{15}$/.test(arn)) throw new HttpError(400, 'Enter a 15-character ARN using letters and numbers');
 
     const filing = await GstFiling.findById(req.params.id);
     if (!filing) throw new HttpError(404, 'Filing not found');
@@ -255,11 +258,16 @@ router.post(
 
     filing.returnsLog = filing.returnsLog || [];
     const idx = filing.returnsLog.findIndex((l) => l.period === period && l.kind === kind);
+    if (status === 'filed' && (
+      filing.returnsLog.some((log, index) => index !== idx && log.arn === arn) ||
+      await GstFiling.exists({ _id: { $ne: filing._id }, 'returnsLog.arn': arn })
+    )) throw new HttpError(409, 'This ARN is already used for another return');
     const entry = {
       period,
       kind,
       status,
       filedOn: day || undefined,
+      arn: status === 'filed' ? arn : undefined,
       updatedBy: req.user._id,
       updatedAt: new Date(),
     };
@@ -308,7 +316,7 @@ router.post(
 
     res.json({
       message: `${kind.toUpperCase()} marked as ${status}`,
-      data: { period, kind, status, filedOn: day },
+      data: { period, kind, status, filedOn: day, arn: entry.arn },
     });
   })
 );
